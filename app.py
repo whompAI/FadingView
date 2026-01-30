@@ -3,8 +3,16 @@ import streamlit.components.v1 as components
 import yfinance as yf
 import pandas as pd
 import requests
+import re
 import hashlib
 import json
+import html
+import threading
+import time
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="FadingView", initial_sidebar_state="collapsed")
@@ -21,15 +29,11 @@ DIM     = "#6a7a73"
 BLUE    = "#3cc4ff"
 FONT_PRIMARY = "'Space Grotesk','Inter','Helvetica Neue',sans-serif"
 FONT_MONO    = "'IBM Plex Mono','SF Mono','Fira Code','Cascadia Code',monospace"
-
-# ── State ────────────────────────────────────────────────────────────────────
-for k, v in {
-    "watchlist": ["NQ=F","ES=F","SPY","QQQ","BTC-USD","NVDA","GOOG",
-                  "META","PLTR","INTC","AMD","MU","AMZN","AAPL","AVGO"],
-    "selected": "AVGO", "timeframe": "15m", "extended": False,
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+DEFAULT_WATCHLIST = ["NQ=F","ES=F","SPY","QQQ","BTC-USD","NVDA","GOOG",
+                     "META","PLTR","INTC","AMD","MU","AMZN","AAPL","AVGO"]
+WATCHLIST_FILE = Path(__file__).with_name("watchlist.json")
+ALLOW_SERVER_WATCHLIST = os.environ.get("FV_ALLOW_SERVER_WATCHLIST") == "1"
+DEBUG_UI = os.environ.get("FV_DEBUG", "0") == "1"
 
 TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1D", "1W"]
 
@@ -39,19 +43,139 @@ def _parse_bool(val):
         return val.strip().lower() in ("1", "true", "t", "yes", "y", "on")
     return bool(val)
 
+def _qp_value(qp, key):
+    if key not in qp:
+        return ""
+    val = qp.get(key)
+    if isinstance(val, list):
+        return val[0] if val else ""
+    return val
+
+def _norm_symbol(raw):
+    if raw is None:
+        return ""
+    sym = str(raw).strip().upper()
+    # Allow common ticker chars: letters, digits, '=', '-', '.', '^', '/'
+    sym = re.sub(r"[^A-Z0-9=\-.\^/]", "", sym)
+    return sym
+
+def _normalize_watchlist(items):
+    cleaned = []
+    for item in items or []:
+        sym = _norm_symbol(item)
+        if sym and sym not in cleaned:
+            cleaned.append(sym)
+    return cleaned
+
+def handle_component_event(event):
+    """Handle events from frontend. Returns True if new data fetched."""
+    if not event:
+        return False
+
+    event_type = event.get("type")
+    symbol = event.get("symbol")
+
+    if event_type == "request_data" and symbol:
+        try:
+            data = yf.download(symbol, period="1d", interval="5m", progress=False)
+            if not data.empty:
+                if "chart_data" not in st.session_state:
+                    st.session_state.chart_data = {}
+                st.session_state.chart_data[symbol] = data.reset_index().to_dict("records")
+                return True
+        except Exception as exc:
+            st.session_state[f"error_{symbol}"] = str(exc)
+            return True
+
+    elif event_type == "update_watchlist":
+        st.session_state.watchlist = event.get("watchlist", [])
+        return False
+
+    elif event_type == "select_symbol":
+        st.session_state.selected_symbol = symbol
+        return False
+
+    return False
+
+def load_watchlist():
+    if not ALLOW_SERVER_WATCHLIST:
+        return list(DEFAULT_WATCHLIST)
+    try:
+        if WATCHLIST_FILE.exists():
+            data = json.loads(WATCHLIST_FILE.read_text())
+            if isinstance(data, list) and data:
+                cleaned = []
+                for item in data:
+                    sym = _norm_symbol(item)
+                    if sym and sym not in cleaned:
+                        cleaned.append(sym)
+                if cleaned:
+                    return cleaned
+    except Exception:
+        pass
+    return list(DEFAULT_WATCHLIST)
+
+def save_watchlist(wl):
+    if not ALLOW_SERVER_WATCHLIST:
+        return
+    try:
+        WATCHLIST_FILE.write_text(json.dumps(wl))
+    except Exception:
+        pass
+
+# ── State ────────────────────────────────────────────────────────────────────
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+if "selected" not in st.session_state:
+    st.session_state.selected = st.session_state.watchlist[0] if st.session_state.watchlist else ""
+if "timeframe" not in st.session_state:
+    st.session_state.timeframe = "15m"
+if "extended" not in st.session_state:
+    st.session_state.extended = False
+if "_fv_ready" not in st.session_state:
+    st.session_state._fv_ready = False
+if "_fv_last_event" not in st.session_state:
+    st.session_state._fv_last_event = None
+if "_fv_last_event_ts" not in st.session_state:
+    st.session_state._fv_last_event_ts = None
+
 qp = st.query_params
 requested_symbol = None
+watchlist_message = ""
+search_query = str(_qp_value(qp, "search")).strip()
+if search_query:
+    search_query = search_query[:64]
 if "sel" in qp:
-    _s = qp["sel"]
+    _s = _qp_value(qp, "sel")
     requested_symbol = _s
     if _s in st.session_state.watchlist:
         st.session_state.selected = _s
 if "tf" in qp:
-    _tf = qp["tf"]
+    _tf = _qp_value(qp, "tf")
     if _tf in TIMEFRAMES:
         st.session_state.timeframe = _tf
 if "ext" in qp:
-    st.session_state.extended = _parse_bool(qp["ext"])
+    st.session_state.extended = _parse_bool(_qp_value(qp, "ext"))
+if "add" in qp:
+    raw_add = _norm_symbol(_qp_value(qp, "add"))
+    if raw_add:
+        wl = list(st.session_state.watchlist)
+        if raw_add not in wl:
+            wl.append(raw_add)
+            st.session_state.watchlist = wl
+            st.session_state.selected = raw_add
+        else:
+            st.session_state.selected = raw_add
+    else:
+        watchlist_message = "Invalid ticker symbol"
+if "rm" in qp:
+    raw_rm = _norm_symbol(_qp_value(qp, "rm"))
+    if raw_rm and raw_rm in st.session_state.watchlist:
+        wl = [t for t in st.session_state.watchlist if t != raw_rm]
+        st.session_state.watchlist = wl
+        if st.session_state.selected == raw_rm:
+            st.session_state.selected = wl[0] if wl else ""
+
 
 # ── Streamlit CSS — ultra-minimal control bar ─────────────────────────────────
 st.markdown(f"""<style>
@@ -182,6 +306,403 @@ def get_info(tk):
                 i.get("sector",i.get("industry","")))
     except: return tk,"",""
 
+def _cache_key(sym, tf, ext):
+    return f"{sym}|{tf}|{1 if ext else 0}"
+
+def _build_symbol_payload(tk, tf, ext):
+    df_t = fetch_ohlcv(tk, tf, ext)
+    effective_tf = tf
+    effective_ext = ext
+    if df_t.empty and tf not in ("1D", "1W"):
+        df_t = fetch_ohlcv(tk, "1D", False)
+        effective_tf = "1D"
+        effective_ext = False
+    if df_t.empty:
+        return None
+    if isinstance(df_t.columns, pd.MultiIndex):
+        df_t.columns = df_t.columns.droplevel(1)
+
+    L = df_t.iloc[-1]
+    cl = float(L["Close"])
+    pv = float(df_t["Close"].iloc[-2]) if len(df_t) > 1 else cl
+    sv = float(L["SMA20"]) if pd.notna(L.get("SMA20")) else None
+    ev = float(L["EMA50"]) if pd.notna(L.get("EMA50")) else None
+
+    cnd, sma20, ema50 = [], [], []
+    for ts, r in df_t.iterrows():
+        t = int(ts.timestamp())
+        cnd.append({
+            "time": t,
+            "open": round(float(r["Open"]), 2),
+            "high": round(float(r["High"]), 2),
+            "low": round(float(r["Low"]), 2),
+            "close": round(float(r["Close"]), 2),
+        })
+        if pd.notna(r.get("SMA20")):
+            sma20.append({"time": t, "value": round(float(r["SMA20"]), 2)})
+        if pd.notna(r.get("EMA50")):
+            ema50.append({"time": t, "value": round(float(r["EMA50"]), 2)})
+
+    last_ts = df_t.index[-1]
+    if effective_tf in ("1D", "1W"):
+        session_df = df_t.tail(1)
+    else:
+        last_day = last_ts.date()
+        session_df = df_t[df_t.index.date == last_day]
+    session_high = float(session_df["High"].max()) if not session_df.empty else float(L["High"])
+    session_low = float(session_df["Low"].min()) if not session_df.empty else float(L["Low"])
+    if "Volume" in session_df.columns:
+        session_vol = float(session_df["Volume"].sum())
+        if pd.isna(session_vol):
+            session_vol = None
+    else:
+        session_vol = None
+    if pd.isna(session_high):
+        session_high = float(L["High"])
+    if pd.isna(session_low):
+        session_low = float(L["Low"])
+    time_str = last_ts.strftime("%H:%M")
+
+    chg_val = cl - pv
+    chg_pct = (chg_val / pv * 100) if pv else 0
+    price_color = UP if chg_val >= 0 else DOWN
+    chg_sign = "+" if chg_val >= 0 else ""
+    name, ex_name, _ = get_info(tk)
+    session_tag = "RTH" if effective_tf in ("1D", "1W") else ("EXT" if effective_ext else "RTH")
+    meta_text = f"{ex_name} · {effective_tf.upper()} · {session_tag}" if ex_name else f"{effective_tf.upper()} · {session_tag}"
+
+    return {
+        "symbol": tk,
+        "timeframe": effective_tf,
+        "ext": effective_ext,
+        "candles": cnd,
+        "sma20": sma20,
+        "ema50": ema50,
+        "last": {
+            "o": round(float(L["Open"]), 2),
+            "h": round(float(L["High"]), 2),
+            "l": round(float(L["Low"]), 2),
+            "c": round(cl, 2),
+            "s": round(sv, 2) if sv is not None else None,
+            "e": round(ev, 2) if ev is not None else None,
+        },
+        "panel": {
+            "open": round(float(L["Open"]), 2),
+            "high": round(session_high, 2),
+            "low": round(session_low, 2),
+            "volume": round(session_vol, 0) if session_vol is not None else None,
+            "time_str": time_str,
+            "status": session_tag,
+        },
+        "meta_text": meta_text,
+        "price_color": price_color,
+        "chg_str": f"{chg_sign}{chg_val:,.2f}",
+        "chg_pct_str": f"{chg_sign}{chg_pct:.2f}%",
+    }
+
+def _get_cached_payload(sym, tf, ext):
+    cache = st.session_state.setdefault("_fv_cache", {})
+    key = _cache_key(sym, tf, ext)
+    if key in cache:
+        return cache[key]
+    payload = _build_symbol_payload(sym, tf, ext)
+    if payload:
+        cache[key] = payload
+    return payload
+
+SEARCH_ENDPOINT = "https://query2.finance.yahoo.com/v1/finance/search"
+SEARCH_PORT = 8502
+_SEARCH_SERVER_STARTED = False
+UNIVERSE_TTL = 7 * 24 * 60 * 60
+SYMBOL_CACHE_FILE = Path(__file__).with_name("symbol_universe.json")
+_UNIVERSE_CACHE = {"data": None, "ts": 0}
+DEFAULT_SYMBOLS = [
+    {"symbol": "AAPL", "name": "Apple Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "MSFT", "name": "Microsoft Corp.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "NVDA", "name": "NVIDIA Corp.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "AMD", "name": "Advanced Micro Devices", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "AMZN", "name": "Amazon.com Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "GOOG", "name": "Alphabet Inc. Class C", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "META", "name": "Meta Platforms Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "TSLA", "name": "Tesla Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "NFLX", "name": "Netflix Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "ASML", "name": "ASML Holding N.V.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "BABA", "name": "Alibaba Group Holding Ltd.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "BRK-B", "name": "Berkshire Hathaway Inc. Class B", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "JNJ", "name": "Johnson & Johnson", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "V", "name": "Visa Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "JPM", "name": "JPMorgan Chase & Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "WMT", "name": "Walmart Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "PG", "name": "Procter & Gamble Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "MA", "name": "Mastercard Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "UNH", "name": "UnitedHealth Group Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "MCD", "name": "McDonald's Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "KO", "name": "Coca-Cola Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "PEP", "name": "PepsiCo Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "INTC", "name": "Intel Corp.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "ADBE", "name": "Adobe Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "CRM", "name": "Salesforce Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "ORCL", "name": "Oracle Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "T", "name": "AT&T Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "VZ", "name": "Verizon Communications Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "NKE", "name": "Nike Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "PYPL", "name": "PayPal Holdings Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "COST", "name": "Costco Wholesale Corp.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "CSCO", "name": "Cisco Systems Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "AVGO", "name": "Broadcom Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "TXN", "name": "Texas Instruments Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "XOM", "name": "Exxon Mobil Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "CVX", "name": "Chevron Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "PFE", "name": "Pfizer Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "MRVL", "name": "Marvell Technology Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "AMD", "name": "Advanced Micro Devices", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "HON", "name": "Honeywell International Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "LOW", "name": "Lowe's Companies Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "MMM", "name": "3M Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "GE", "name": "General Electric Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "BA", "name": "Boeing Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "CAT", "name": "Caterpillar Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "ABNB", "name": "Airbnb Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "SNOW", "name": "Snowflake Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "SBUX", "name": "Starbucks Corp.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "RTX", "name": "RTX Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "SNY", "name": "Sanofi", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "TMUS", "name": "T-Mobile US Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "UPS", "name": "United Parcel Service Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "FDX", "name": "FedEx Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "TGT", "name": "Target Corp.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "BMY", "name": "Bristol-Myers Squibb Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "DE", "name": "Deere & Co.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "CAT", "name": "Caterpillar Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "LIN", "name": "Linde plc", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "CHTR", "name": "Charter Communications Inc.", "exchange": "NASDAQ", "type": "EQUITY"},
+    {"symbol": "NOW", "name": "ServiceNow Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "SPGI", "name": "S&P Global Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "ICE", "name": "Intercontinental Exchange Inc.", "exchange": "NYSE", "type": "EQUITY"},
+    {"symbol": "BLK", "name": "BlackRock Inc.", "exchange": "NYSE", "type": "EQUITY"},
+]
+
+def _search_tickers_uncached(query):
+    q = str(query or "").strip()
+    if not q or len(q) < 2:
+        return []
+    params = {"q": q, "quotesCount": 8, "newsCount": 0, "lang": "en-US", "region": "US"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
+    try:
+        resp = requests.get(SEARCH_ENDPOINT, params=params, headers=headers, timeout=6)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    results = []
+    for item in payload.get("quotes", []):
+        sym = item.get("symbol") or item.get("Symbol")
+        if not sym:
+            continue
+        clean = _norm_symbol(sym)
+        if not clean:
+            continue
+        results.append({
+            "symbol": clean,
+            "name": item.get("shortname") or item.get("longname") or item.get("name") or "",
+            "exchange": item.get("exchDisp") or item.get("exchange") or item.get("exch") or "",
+            "type": item.get("quoteType") or item.get("type") or "",
+        })
+    if results:
+        return results
+    # Fallback to Yahoo autocomplete API
+    try:
+        auto_resp = requests.get(
+            "https://autoc.finance.yahoo.com/autoc",
+            params={"query": q, "region": 1, "lang": "en"},
+            headers=headers,
+            timeout=6,
+        )
+        auto_resp.raise_for_status()
+        auto_payload = auto_resp.json()
+    except Exception:
+        auto_payload = {}
+    for item in auto_payload.get("ResultSet", {}).get("Result", []):
+        sym = item.get("symbol") or item.get("Symbol")
+        if not sym:
+            continue
+        clean = _norm_symbol(sym)
+        if not clean:
+            continue
+        results.append({
+            "symbol": clean,
+            "name": item.get("name") or item.get("Name") or "",
+            "exchange": item.get("exchDisp") or item.get("exch") or "",
+            "type": item.get("type") or "",
+        })
+    if results:
+        return results
+    return search_universe(q)
+
+def _parse_nasdaq_traded(text):
+    rows = []
+    for line in text.splitlines():
+        if not line or line.startswith("Symbol|") or line.startswith("File Creation Time"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        sym = _norm_symbol(parts[0])
+        if not sym:
+            continue
+        name = parts[1].strip()
+        rows.append({"symbol": sym, "name": name, "exchange": "NASDAQ", "type": "EQUITY"})
+    return rows
+
+def _parse_other_listed(text):
+    rows = []
+    for line in text.splitlines():
+        if not line or line.startswith("ACT Symbol|") or line.startswith("File Creation Time"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        sym = _norm_symbol(parts[0])
+        if not sym:
+            continue
+        name = parts[1].strip()
+        exch_code = parts[2].strip()
+        exch_map = {"N": "NYSE", "A": "NYSE American", "P": "NYSE Arca", "Z": "BATS", "V": "IEX"}
+        exch = exch_map.get(exch_code, exch_code)
+        rows.append({"symbol": sym, "name": name, "exchange": exch, "type": "EQUITY"})
+    return rows
+
+def load_symbol_universe():
+    now = time.time()
+    if _UNIVERSE_CACHE["data"] and now - _UNIVERSE_CACHE["ts"] < UNIVERSE_TTL:
+        return _UNIVERSE_CACHE["data"]
+    try:
+        if SYMBOL_CACHE_FILE.exists():
+            age = now - SYMBOL_CACHE_FILE.stat().st_mtime
+            if age < UNIVERSE_TTL:
+                data = json.loads(SYMBOL_CACHE_FILE.read_text())
+                if isinstance(data, list) and data:
+                    _UNIVERSE_CACHE["data"] = data
+                    _UNIVERSE_CACHE["ts"] = now
+                    return data
+    except Exception:
+        pass
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/plain, */*",
+    }
+    rows = []
+    try:
+        nasdaq_resp = requests.get(
+            "https://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqtraded.txt",
+            headers=headers,
+            timeout=8,
+        )
+        if nasdaq_resp.ok:
+            rows.extend(_parse_nasdaq_traded(nasdaq_resp.text))
+    except Exception:
+        pass
+    try:
+        other_resp = requests.get(
+            "https://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt",
+            headers=headers,
+            timeout=8,
+        )
+        if other_resp.ok:
+            rows.extend(_parse_other_listed(other_resp.text))
+    except Exception:
+        pass
+    if rows:
+        uniq = {}
+        for item in rows:
+            sym = item["symbol"]
+            if sym not in uniq:
+                uniq[sym] = item
+        data = list(uniq.values())
+        try:
+            SYMBOL_CACHE_FILE.write_text(json.dumps(data))
+        except Exception:
+            pass
+        _UNIVERSE_CACHE["data"] = data
+        _UNIVERSE_CACHE["ts"] = now
+        return data
+    _UNIVERSE_CACHE["data"] = DEFAULT_SYMBOLS
+    _UNIVERSE_CACHE["ts"] = now
+    return DEFAULT_SYMBOLS
+
+def search_universe(query):
+    q = str(query or "").strip().upper()
+    if len(q) < 2:
+        return []
+    universe = load_symbol_universe()
+    matches = []
+    for item in universe:
+        sym = item.get("symbol", "").upper()
+        name = item.get("name", "").upper()
+        if sym.startswith(q) or q in name:
+            matches.append(item)
+        if len(matches) >= 12:
+            break
+    return matches
+
+@st.cache_data(ttl=900, show_spinner=False)
+def search_tickers(query):
+    return _search_tickers_uncached(query)
+
+class SearchHandler(BaseHTTPRequestHandler):
+    def _send_cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._send_cors()
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/search":
+            self.send_response(404)
+            self._send_cors()
+            self.end_headers()
+            return
+        params = parse_qs(parsed.query or "")
+        q = params.get("q", [""])[0]
+        results = _search_tickers_uncached(q)
+        body = json.dumps(results)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self._send_cors()
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        return
+
+def ensure_search_server():
+    global _SEARCH_SERVER_STARTED
+    if _SEARCH_SERVER_STARTED:
+        return
+    try:
+        httpd = HTTPServer(("0.0.0.0", SEARCH_PORT), SearchHandler)
+    except OSError:
+        _SEARCH_SERVER_STARTED = True
+        return
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _SEARCH_SERVER_STARTED = True
+
+ensure_search_server()
+
 # ── Sparkline helpers ────────────────────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
 def get_sparklines(tup):
@@ -220,6 +741,28 @@ def build_html_component(data):
     wl = data["watchlist"]
     quotes = data["quotes"]
     symbol_data_json = json.dumps(data["symbol_data"])
+    watchlist_json = json.dumps(wl)
+    debug_info = data.get("debug_info") or {}
+    debug_enabled = data.get("debug_enabled", False)
+    last_event_payload = debug_info.get("last_event")
+    last_event_ts = debug_info.get("last_event_ts") or "--"
+    last_event_text = json.dumps(last_event_payload, indent=2) if last_event_payload is not None else "None"
+    debug_panel = ""
+    if debug_enabled:
+        debug_panel = f"""
+        <div id="fv-debug-panel">
+            <div class="fv-debug-line"><span class="fv-debug-label">componentReady</span>
+                <span class="fv-debug-value">{'YES' if debug_info.get('ready') else 'NO'}</span>
+            </div>
+            <div class="fv-debug-line"><span class="fv-debug-label">lastEventTs</span>
+                <span class="fv-debug-value">{html.escape(str(last_event_ts))}</span>
+            </div>
+            <div class="fv-debug-line fv-debug-block">
+                <span class="fv-debug-label">lastEvent</span>
+                <pre class="fv-debug-pre">{html.escape(last_event_text)}</pre>
+            </div>
+        </div>
+        """
     sparklines = data["sparklines"]
     ticker_names = data["ticker_names"]
     last = data["last"]
@@ -227,6 +770,46 @@ def build_html_component(data):
     data_status = data.get("data_status", {})
     missing_symbol = data.get("missing_symbol") or ""
     missing_message = data.get("missing_message") or ""
+    watchlist_message = data.get("watchlist_message") or ""
+    search_query = data.get("search_query") or ""
+    search_results = data.get("search_results") or []
+    search_value = html.escape(search_query)
+    search_query_js = json.dumps(search_query)
+    symbol_universe = data.get("symbol_universe") or []
+    symbol_universe_json = json.dumps(symbol_universe)
+    search_rows = ""
+    if search_query:
+        if search_results:
+            for item in search_results:
+                sym = html.escape(item.get("symbol", ""))
+                name = html.escape(item.get("name", ""))
+                exch = html.escape(item.get("exchange", ""))
+                qtype = html.escape(item.get("type", ""))
+                meta_parts = " · ".join([p for p in [exch, qtype] if p])
+                search_rows += f"""
+                <div class="search-item" data-symbol="{sym}">
+                    <div class="search-main">
+                        <div class="search-symbol">{sym}</div>
+                        <div class="search-name">{name}</div>
+                    </div>
+                    <div class="search-meta">{meta_parts}</div>
+                </div>
+                """
+        else:
+            search_rows = """
+            <div class="search-empty">No matches. Use + to add exact ticker.</div>
+            """
+    search_results_class = "search-results" + (" active" if len(search_query) >= 2 else "")
+    symbol_menu_rows = ""
+    for tk in wl:
+        name = html.escape(ticker_names.get(tk, tk))
+        sym = html.escape(tk)
+        symbol_menu_rows += f"""
+        <div class="symbol-menu-item" data-symbol="{sym}" data-name="{name}">
+            <div class="symbol-menu-symbol">{sym}</div>
+            <div class="symbol-menu-name">{name}</div>
+        </div>
+        """
     
     # Header format
     meta_text = data["meta_text"]
@@ -254,7 +837,7 @@ def build_html_component(data):
         
         if px is not None:
             wl_rows += f"""
-            <div class="watch-item{active_cls}{no_data_cls}" data-symbol="{tk}" onclick="switchSymbol(event, '{tk}')">
+            <div class="watch-item{active_cls}{no_data_cls}" data-symbol="{tk}" data-name="{name}" onclick="switchSymbol(event, '{tk}')">
                 <div class="watch-left">
                     <div class="drag-handle"></div>
                     <div class="sym-dot {dot_cls}"></div>
@@ -269,11 +852,12 @@ def build_html_component(data):
                     <div class="sym-last">{px:,.2f}</div>
                     <div class="sym-change {change_cls}">{sign}{pt:.2f}%</div>
                 </div>
+                <button class="watch-remove" onclick="removeSymbol(event, '{tk}')">x</button>
             </div>
             """
         else:
             wl_rows += f"""
-            <div class="watch-item{active_cls}{no_data_cls}" data-symbol="{tk}" onclick="switchSymbol(event, '{tk}')">
+            <div class="watch-item{active_cls}{no_data_cls}" data-symbol="{tk}" data-name="{name}" onclick="switchSymbol(event, '{tk}')">
                 <div class="watch-left">
                     <div class="drag-handle"></div>
                     <div class="sym-dot down"></div>
@@ -288,6 +872,7 @@ def build_html_component(data):
                     <div class="sym-last">---</div>
                     <div class="sym-change">--%</div>
                 </div>
+                <button class="watch-remove" onclick="removeSymbol(event, '{tk}')">x</button>
             </div>
             """
 
@@ -331,6 +916,71 @@ def build_html_component(data):
             font-size: 13px;
         }}
 
+        #fv-debug-panel {{
+            position: fixed;
+            top: 8px;
+            right: 8px;
+            z-index: 9999;
+            background: rgba(11, 15, 13, 0.9);
+            border: 1px solid var(--border);
+            padding: 8px 10px;
+            font-family: var(--font-mono);
+            font-size: 9px;
+            color: var(--text-primary);
+            max-width: 320px;
+            box-shadow: 0 8px 18px rgba(0,0,0,0.4);
+        }}
+
+        .fv-debug-line {{
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }}
+
+        .fv-debug-block {{
+            display: block;
+        }}
+
+        .fv-debug-label {{
+            color: var(--text-secondary);
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+        }}
+
+        .fv-debug-value {{
+            color: var(--accent);
+            font-weight: 600;
+        }}
+
+        .fv-debug-pre {{
+            margin-top: 4px;
+            padding: 4px 6px;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--border);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 140px;
+            overflow: auto;
+        }}
+
+        #fv-fatal-banner {{
+            position: fixed;
+            left: 50%;
+            transform: translateX(-50%);
+            top: 10px;
+            z-index: 10000;
+            background: #2a0f0f;
+            color: #ffb1b1;
+            border: 1px solid #7a2a2a;
+            padding: 10px 14px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 0.4px;
+            text-transform: none;
+            display: none;
+        }}
+
         /* HEADER - EXACT TRADINGVIEW SPEC */
         .top-header {{
             height: 36px;
@@ -342,12 +992,16 @@ def build_html_component(data):
             justify-content: space-between;
             backdrop-filter: blur(10px);
             box-shadow: 0 10px 24px rgba(0,0,0,0.35);
+            position: relative;
+            z-index: 10;
+            overflow: visible;
         }}
 
         .header-left {{
             display: flex;
             align-items: center;
             gap: 12px;
+            overflow: visible;
         }}
 
         .header-right {{
@@ -464,6 +1118,7 @@ def build_html_component(data):
             display: flex;
             flex-direction: column;
             line-height: 1.2;
+            position: relative;
         }}
 
         .symbol-name {{
@@ -474,6 +1129,7 @@ def build_html_component(data):
             display: flex;
             align-items: center;
             gap: 6px;
+            cursor: pointer;
         }}
 
         .symbol-meta {{
@@ -481,6 +1137,82 @@ def build_html_component(data):
             color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 1.2px;
+        }}
+
+        .symbol-menu {{
+            position: absolute;
+            top: 36px;
+            left: 0;
+            width: 220px;
+            background: rgba(11, 15, 13, 0.98);
+            border: 1px solid var(--border);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+            display: none;
+            z-index: 20;
+        }}
+
+        .symbol-menu.active {{
+            display: block;
+        }}
+
+        .symbol-menu-header {{
+            padding: 6px 8px;
+            font-size: 9px;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+        }}
+
+        .symbol-menu-search {{
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+        }}
+
+        .symbol-menu-search input {{
+            width: 100%;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            font-size: 10px;
+            padding: 4px 6px;
+            font-family: var(--font-mono);
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+        }}
+
+        .symbol-menu-list {{
+            max-height: 180px;
+            overflow-y: auto;
+        }}
+
+        .symbol-menu-item {{
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            cursor: pointer;
+        }}
+
+        .symbol-menu-item:hover {{
+            background: rgba(0, 208, 132, 0.1);
+        }}
+
+        .symbol-menu-symbol {{
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-primary);
+        }}
+
+        .symbol-menu-name {{
+            font-size: 9px;
+            color: var(--text-secondary);
+        }}
+
+        .symbol-menu-footer {{
+            padding: 6px 8px;
+            font-size: 9px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }}
 
         /* OHLC Block */
@@ -729,6 +1461,129 @@ def build_html_component(data):
             align-items: center;
         }}
 
+        .watchlist-controls {{
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }}
+
+        .watchlist-controls input {{
+            flex: 1;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 4px 6px;
+            font-size: 10px;
+            font-family: var(--font-mono);
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+        }}
+
+        .watchlist-controls input::placeholder {{
+            color: var(--text-secondary);
+        }}
+
+        .watch-search {{
+            width: 32px;
+            height: 22px;
+            border: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.25);
+            color: var(--text-secondary);
+            font-size: 9px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            cursor: pointer;
+            font-family: var(--font-mono);
+        }}
+
+        .watch-search:hover {{
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }}
+
+        .watch-add {{
+            width: 22px;
+            height: 22px;
+            border: 1px solid var(--border);
+            background: rgba(0, 0, 0, 0.25);
+            color: var(--text-secondary);
+            font-size: 12px;
+            cursor: pointer;
+        }}
+
+        .watch-add:hover {{
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }}
+
+        .watchlist-hint {{
+            padding: 4px 10px 6px;
+            font-size: 9px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid var(--border);
+        }}
+
+        .search-results {{
+            border-bottom: 1px solid var(--border);
+            display: none;
+            max-height: 160px;
+            overflow-y: auto;
+        }}
+
+        .search-results.active {{
+            display: block;
+        }}
+
+        .search-item {{
+            padding: 6px 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            border-bottom: 1px solid rgba(255,255,255,0.03);
+        }}
+
+        .search-item:hover {{
+            background: rgba(0, 208, 132, 0.08);
+        }}
+
+        .search-main {{
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }}
+
+        .search-symbol {{
+            font-family: var(--font-mono);
+            font-size: 10px;
+            letter-spacing: 0.8px;
+            color: var(--text-primary);
+        }}
+
+        .search-name {{
+            font-size: 9px;
+            color: var(--text-secondary);
+        }}
+
+        .search-meta {{
+            font-size: 8px;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }}
+
+        .search-empty {{
+            padding: 6px 10px;
+            font-size: 9px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+
         .watchlist-count {{
             font-size: 10px;
             color: var(--text-secondary);
@@ -775,6 +1630,26 @@ def build_html_component(data):
             text-transform: uppercase;
             color: var(--text-secondary);
             margin-top: 2px;
+        }}
+
+        .watch-remove {{
+            margin-left: 6px;
+            border: 1px solid transparent;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 10px;
+            cursor: pointer;
+            opacity: 0;
+        }}
+
+        .watch-item:hover .watch-remove {{
+            opacity: 0.7;
+        }}
+
+        .watch-remove:hover {{
+            opacity: 1;
+            color: var(--text-primary);
+            border-color: var(--border);
         }}
 
         .watchlist-warning {{
@@ -893,6 +1768,8 @@ def build_html_component(data):
     </style>
 </head>
 <body>
+    {debug_panel}
+    <div id="fv-fatal-banner"></div>
 
     <!-- EXACT TRADINGVIEW HEADER -->
         <div class="top-header">
@@ -908,11 +1785,21 @@ def build_html_component(data):
                 </div>
             </div>
             <div class="symbol-block">
-                <div class="symbol-name">
+                <div class="symbol-name" id="symbolToggle">
                     <span id="symbolName">{sel}</span>
                     <span style="font-size: 10px; color: var(--text-secondary);">▼</span>
                 </div>
                 <div class="symbol-meta" id="symbolMeta">{meta_text}</div>
+                <div class="symbol-menu" id="symbolMenu">
+                    <div class="symbol-menu-header">Symbols</div>
+                    <div class="symbol-menu-search">
+                        <input id="symbolMenuSearch" placeholder="Filter watchlist" />
+                    </div>
+                    <div class="symbol-menu-list" id="symbolMenuList">
+                        {symbol_menu_rows}
+                    </div>
+                    <div class="symbol-menu-footer">Use watchlist search for global tickers</div>
+                </div>
             </div>
 
             <div class="ohlc-block">
@@ -989,6 +1876,15 @@ def build_html_component(data):
                 <span>Watchlist</span>
                 <span class="watchlist-count">{len(wl)} Active</span>
             </div>
+            <div class="watchlist-controls">
+                <input id="watchSearch" placeholder="Search tickers (type 2+)" value="{search_value}" />
+                <button class="watch-search" id="watchSearchBtn">Go</button>
+                <button class="watch-add" id="watchAddBtn">+</button>
+            </div>
+            <div class="watchlist-hint">Enter = add top result · + = add exact ticker</div>
+            <div class="{search_results_class}" id="searchResults">
+                {search_rows}
+            </div>
             <div class="watchlist-warning" id="dataWarning"></div>
             <div id="watchlist-items">
                 {wl_rows}
@@ -1015,12 +1911,22 @@ def build_html_component(data):
     </div>
 
     <script>
+        if (window.location.hostname === '0.0.0.0') {{
+            var redirectUrl = new URL(window.location.href);
+            redirectUrl.hostname = 'localhost';
+            window.location.replace(redirectUrl.toString());
+        }}
         var symbolData = {symbol_data_json};
         var currentSymbol = "{sel}";
         var currentTf = "{tf}";
         var currentExt = {ext_flag};
         var missingSymbol = "{missing_symbol}";
         var missingMessage = "{missing_message}";
+        var watchlistMessage = "{watchlist_message}";
+        var currentSearch = {search_query_js};
+        var lastSearchQuery = currentSearch || "";
+        var symbolUniverse = {symbol_universe_json};
+        var serverWatchlist = {watchlist_json};
         if (!symbolData[currentSymbol]) {{
             var keys = Object.keys(symbolData);
             currentSymbol = keys.length ? keys[0] : "";
@@ -1031,71 +1937,157 @@ def build_html_component(data):
         var upColor = '{UP}';
         var downColor = '{DOWN}';
 
-        function setParentParam(key, value, reload) {{
+        var WATCHLIST_KEY = 'fv_watchlist';
+
+        function readLocalWatchlistState() {{
+            var raw = null;
+            try {{ raw = localStorage.getItem(WATCHLIST_KEY); }} catch (e) {{}}
+            if (raw === null) return {{ list: null, hasValue: false }};
             try {{
-                var parentUrl = new URL(window.parent.location.href);
-                if (value === null || value === undefined) {{
-                    parentUrl.searchParams.delete(key);
-                }} else {{
-                    parentUrl.searchParams.set(key, value);
+                var parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {{
+                    return {{ list: parsed, hasValue: true }};
                 }}
-                if (reload) {{
-                    window.parent.location.href = parentUrl.toString();
-                }} else {{
-                    window.parent.history.replaceState({{}}, "", parentUrl.toString());
-                }}
+                return {{ list: null, hasValue: false }};
             }} catch (e) {{
-                try {{
-                    var localUrl = new URL(window.location.href);
-                    if (value === null || value === undefined) {{
-                        localUrl.searchParams.delete(key);
-                    }} else {{
-                        localUrl.searchParams.set(key, value);
-                    }}
-                    if (reload) {{
-                        window.location.href = localUrl.toString();
-                    }} else {{
-                        window.history.replaceState({{}}, "", localUrl.toString());
-                    }}
-                }} catch (err) {{}}
+                return {{ list: null, hasValue: false }};
             }}
         }}
 
-        // Split.js - Resizable Panels
-        Split(['#chart-panel', '#watchlist-panel'], {{
-            sizes: [75, 25],
-            minSize: [400, 200],
-            gutterSize: 8,
-            cursor: 'col-resize',
-            onDragEnd: function(sizes) {{
-                localStorage.setItem('panelSizes', JSON.stringify(sizes));
+        function writeLocalWatchlist(list) {{
+            try {{ localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list || [])); }} catch (e) {{}}
+        }}
+
+        function readLocalSelected() {{
+            try {{ return localStorage.getItem('selectedSymbol') || ''; }} catch (e) {{ return ''; }}
+        }}
+
+        function listsEqual(a, b) {{
+            if (!Array.isArray(a) || !Array.isArray(b)) return false;
+            if (a.length !== b.length) return false;
+            for (var i = 0; i < a.length; i++) {{
+                if (a[i] !== b[i]) return false;
             }}
-        }});
+            return true;
+        }}
+
+        function sendEvent(payload) {{
+            if (!payload) return;
+            payload.stamp = Date.now();
+            try {{
+                console.log("WATCHLIST_EVENT", payload);
+            }} catch (e) {{}}
+            try {{
+                window.parent.postMessage({{
+                    isStreamlitMessage: true,
+                    type: "streamlit:setComponentValue",
+                    value: payload
+                }}, "*");
+            }} catch (e) {{}}
+        }}
+
+        function syncFromLocalStorage() {{
+            var state = readLocalWatchlistState();
+            if (!state.hasValue) {{
+                writeLocalWatchlist(serverWatchlist || []);
+                return;
+            }}
+            var localList = state.list || [];
+            var localSel = readLocalSelected();
+            if (localSel && localList.indexOf(localSel) === -1) {{
+                localSel = '';
+            }}
+            if (!listsEqual(localList, serverWatchlist) || (localSel && localSel !== currentSymbol)) {{
+                sendEvent({{ type: 'init', watchlist: localList, selected: localSel }});
+            }}
+        }}
+
+        function showFatal(message) {{
+            var banner = document.getElementById('fv-fatal-banner');
+            if (!banner) return;
+            banner.textContent = message;
+            banner.style.display = 'block';
+        }}
+
+        if (!window._fvErrorHandlersBound) {{
+            window.addEventListener('error', function(e) {{
+                var msg = e && e.message ? e.message : 'Unknown script error';
+                showFatal('JS error: ' + msg);
+            }});
+
+            window.addEventListener('unhandledrejection', function(e) {{
+                var reason = e && e.reason ? e.reason : 'Unknown rejection';
+                var msg = reason && reason.message ? reason.message : String(reason);
+                showFatal('Unhandled promise: ' + msg);
+            }});
+            window._fvErrorHandlersBound = true;
+        }}
+
+        var missingDeps = [];
+        if (!window.LightweightCharts) missingDeps.push('LightweightCharts');
+        if (!window.Split) missingDeps.push('Split');
+        if (!window.Sortable) missingDeps.push('Sortable');
+        if (missingDeps.length) {{
+            showFatal('Missing dependency: ' + missingDeps.join(', ') + '. Check CDN availability.');
+        }}
+
+        // Keepalive ping to avoid idle Wi-Fi drops on some networks
+        (function() {{
+            var keepaliveUrl = window.location.origin + '/_stcore/health';
+            setInterval(function() {{
+                fetch(keepaliveUrl, {{ cache: 'no-store' }}).catch(function(){{}});
+            }}, 15000);
+        }})();
+
+        // Split.js - Resizable Panels
+        var splitInstance = null;
+        if (window._fvSplitInstance && window._fvSplitInstance.destroy) {{
+            try {{ window._fvSplitInstance.destroy(); }} catch (e) {{}}
+        }}
+        if (window.Split) {{
+            splitInstance = Split(['#chart-panel', '#watchlist-panel'], {{
+                sizes: [75, 25],
+                minSize: [400, 200],
+                gutterSize: 8,
+                cursor: 'col-resize',
+                onDragEnd: function(sizes) {{
+                    localStorage.setItem('panelSizes', JSON.stringify(sizes));
+                }}
+            }});
+            window._fvSplitInstance = splitInstance;
+        }}
 
         // Restore panel sizes
-        const savedSizes = localStorage.getItem('panelSizes');
-        if (savedSizes) {{
-             try {{ Split(['#chart-panel', '#watchlist-panel']).setSizes(JSON.parse(savedSizes)); }} catch(e) {{}}
+        var panelSizesRaw = null;
+        try {{ panelSizesRaw = localStorage.getItem('panelSizes'); }} catch (e) {{}}
+        if (panelSizesRaw && splitInstance) {{
+             try {{ splitInstance.setSizes(JSON.parse(panelSizesRaw)); }} catch(e) {{}}
         }}
 
         // SortableJS - Draggable Watchlist
         var wlC = document.getElementById('watchlist-items');
-        new Sortable(wlC, {{
-            animation: 150,
-            handle: '.drag-handle', // Only drag via the handle
-            ghostClass: 'dragging',
-            onEnd: function(evt) {{
-                const items = document.querySelectorAll('.watch-item');
-                const order = Array.from(items).map(item => item.dataset.symbol);
-                localStorage.setItem('watchlistOrder', JSON.stringify(order));
-            }}
-        }});
+        if (window._fvSortableInstance && window._fvSortableInstance.destroy) {{
+            try {{ window._fvSortableInstance.destroy(); }} catch (e) {{}}
+        }}
+        if (window.Sortable && wlC) {{
+            window._fvSortableInstance = new Sortable(wlC, {{
+                animation: 150,
+                handle: '.drag-handle', // Only drag via the handle
+                ghostClass: 'dragging',
+                onEnd: function(evt) {{
+                    const items = document.querySelectorAll('.watch-item');
+                    const order = Array.from(items).map(item => item.dataset.symbol);
+                    localStorage.setItem('watchlistOrder', JSON.stringify(order));
+                }}
+            }});
+        }}
 
         // Restore watchlist order
-        const savedOrder = localStorage.getItem('watchlistOrder');
-        if (savedOrder) {{
+        var watchlistOrderRaw = null;
+        try {{ watchlistOrderRaw = localStorage.getItem('watchlistOrder'); }} catch (e) {{}}
+        if (watchlistOrderRaw) {{
             try {{
-                var order = JSON.parse(savedOrder);
+                var order = JSON.parse(watchlistOrderRaw);
                 var rows = Array.from(wlC.children);
                 var rm = {{}}; rows.forEach(function(r){{rm[r.dataset.symbol] = r}});
                 order.forEach(function(tk){{if(rm[tk]) wlC.appendChild(rm[tk])}});
@@ -1105,52 +2097,70 @@ def build_html_component(data):
         }}
 
         // Initialize Chart (TradingView Lightweight)
-        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {{
-            layout: {{
-                background: {{ color: '{BG}' }},
-                textColor: '{DIM}',
-            }},
-            grid: {{
-                vertLines: {{ color: '#15211c' }},
-                horzLines: {{ color: '#15211c' }},
-            }},
-            rightPriceScale: {{
-                borderColor: '{BORDER}',
-            }},
-            timeScale: {{
-                borderColor: '{BORDER}',
-                timeVisible: true,
-            }},
-            crosshair: {{
-                vertLine: {{ color: '{DIM}', style: 2 }},
-                horzLine: {{ color: '{DIM}', style: 2 }},
-            }},
-        }});
+        var chart = {{
+            applyOptions: function() {{}},
+            timeScale: function() {{ return {{ fitContent: function() {{}} }}; }},
+            subscribeCrosshairMove: function() {{}}
+        }};
+        var series = {{ setData: function() {{}} }};
+        var smaSeries = {{ setData: function() {{}}, applyOptions: function() {{}} }};
+        var emaSeries = {{ setData: function() {{}}, applyOptions: function() {{}} }};
+        if (window._fvChart && window._fvChart.remove) {{
+            try {{ window._fvChart.remove(); }} catch (e) {{}}
+        }}
+        if (window.LightweightCharts) {{
+            chart = LightweightCharts.createChart(document.getElementById('chart-container'), {{
+                layout: {{
+                    background: {{ color: '{BG}' }},
+                    textColor: '{DIM}',
+                }},
+                grid: {{
+                    vertLines: {{ color: '#15211c' }},
+                    horzLines: {{ color: '#15211c' }},
+                }},
+                rightPriceScale: {{
+                    borderColor: '{BORDER}',
+                }},
+                timeScale: {{
+                    borderColor: '{BORDER}',
+                    timeVisible: true,
+                }},
+                crosshair: {{
+                    vertLine: {{ color: '{DIM}', style: 2 }},
+                    horzLine: {{ color: '{DIM}', style: 2 }},
+                }},
+            }});
 
-        const series = chart.addCandlestickSeries({{
-            upColor: upColor,
-            downColor: downColor,
-            borderUpColor: upColor,
-            borderDownColor: downColor,
-        }});
-        const smaSeries = chart.addLineSeries({{
-            color: '{BLUE}',
-            lineWidth: 1,
-            priceLineVisible: false,
-        }});
-        const emaSeries = chart.addLineSeries({{
-            color: '#ffb454',
-            lineWidth: 1,
-            priceLineVisible: false,
-        }});
+            series = chart.addCandlestickSeries({{
+                upColor: upColor,
+                downColor: downColor,
+                borderUpColor: upColor,
+                borderDownColor: downColor,
+            }});
+            smaSeries = chart.addLineSeries({{
+                color: '{BLUE}',
+                lineWidth: 1,
+                priceLineVisible: false,
+            }});
+            emaSeries = chart.addLineSeries({{
+                color: '#ffb454',
+                lineWidth: 1,
+                priceLineVisible: false,
+            }});
+            window._fvChart = chart;
+        }}
 
         // Handle window resize
-        window.addEventListener('resize', () => {{
+        if (window._fvResizeHandler) {{
+            try {{ window.removeEventListener('resize', window._fvResizeHandler); }} catch (e) {{}}
+        }}
+        window._fvResizeHandler = function() {{
             chart.applyOptions({{
                 width: document.getElementById('chart-container').clientWidth,
                 height: document.getElementById('chart-container').clientHeight,
             }});
-        }});
+        }};
+        window.addEventListener('resize', window._fvResizeHandler);
         
         // Crosshair + header updates
         var vO=document.getElementById('vO'),vH=document.getElementById('vH'),
@@ -1239,13 +2249,176 @@ def build_html_component(data):
         function updateWarning(){{
             var warn = document.getElementById('dataWarning');
             if (!warn) return;
-            if (missingSymbol) {{
+            if (watchlistMessage) {{
+                warn.textContent = watchlistMessage;
+                warn.style.display = 'block';
+            }} else if (missingSymbol) {{
                 warn.textContent = missingMessage || ("No data for " + missingSymbol);
                 warn.style.display = 'block';
             }} else {{
                 warn.textContent = '';
                 warn.style.display = 'none';
             }}
+        }}
+
+        function normalizeSymbol(val){{
+            if (!val) return "";
+            return val.trim().toUpperCase().replace(/[^A-Z0-9=\-.\^/]/g, "");
+        }}
+
+        function filterWatchlist(){{
+            var input = document.getElementById('watchSearch');
+            if (!input) return;
+            var q = normalizeSymbol(input.value);
+            var rows = document.querySelectorAll('.watch-item');
+            rows.forEach(function(r){{
+                var sym = (r.dataset.symbol || "").toUpperCase();
+                var name = (r.dataset.name || "").toUpperCase();
+                var match = !q || sym.indexOf(q) >= 0 || name.indexOf(q) >= 0;
+                r.style.display = match ? '' : 'none';
+            }});
+        }}
+
+        var searchTimer = null;
+
+        function escapeHtml(str) {{
+            return String(str || "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }}
+
+        function renderSearchResults(items, query, errorMsg){{
+            var el = document.getElementById('searchResults');
+            if (!el) return;
+            if (!query || query.length < 2) {{
+                el.classList.remove('active');
+                el.innerHTML = '';
+                return;
+            }}
+            el.classList.add('active');
+            if (errorMsg) {{
+                el.innerHTML = '<div class="search-empty">' + escapeHtml(errorMsg) + '</div>';
+                return;
+            }}
+            if (!items || !items.length) {{
+                el.innerHTML = '<div class="search-empty">No matches. Use + to add exact ticker.</div>';
+                return;
+            }}
+            var html = items.map(function(item){{
+                var sym = escapeHtml(item.symbol || '');
+                var name = escapeHtml(item.name || '');
+                var meta = escapeHtml(item.meta || '');
+                return '<div class="search-item" data-symbol="' + sym + '">' +
+                    '<div class="search-main">' +
+                        '<div class="search-symbol">' + sym + '</div>' +
+                        '<div class="search-name">' + name + '</div>' +
+                    '</div>' +
+                    '<div class="search-meta">' + meta + '</div>' +
+                '</div>';
+            }}).join('');
+            el.innerHTML = html;
+        }}
+
+        function performLiveSearch(query){{
+            var qRaw = String(query || '').trim().toUpperCase();
+            var qSym = normalizeSymbol(query);
+            try {{
+                console.log("WATCHLIST_EVENT", {{ type: 'search', query: qRaw }});
+            }} catch (e) {{}}
+            if (!qRaw || qRaw.length < 2) {{
+                lastSearchQuery = qRaw;
+                renderSearchResults([], qRaw, '');
+                return;
+            }}
+            if (qRaw === lastSearchQuery) {{
+                return;
+            }}
+            lastSearchQuery = qRaw;
+            var items = [];
+            for (var i = 0; i < symbolUniverse.length; i++) {{
+                var item = symbolUniverse[i] || {{}};
+                var sym = (item.symbol || '').toUpperCase();
+                if (!sym) continue;
+                var name = (item.name || '').toUpperCase();
+                if ((qSym && sym.indexOf(qSym) === 0) || (name && name.indexOf(qRaw) >= 0)) {{
+                    var meta = [item.exchange || '', item.type || ''].filter(Boolean).join(' · ');
+                    items.push({{ symbol: sym, name: item.name || '', meta: meta }});
+                    if (items.length >= 12) break;
+                }}
+            }}
+            renderSearchResults(items, qRaw, '');
+        }}
+
+        function debouncedSearch(){{
+            if (searchTimer) {{
+                clearTimeout(searchTimer);
+            }}
+            searchTimer = setTimeout(function() {{
+                var input = document.getElementById('watchSearch');
+                if (!input) return;
+                performLiveSearch(input.value || '');
+            }}, 350);
+        }}
+
+        function getWorkingWatchlist(){{
+            var state = readLocalWatchlistState();
+            if (state.hasValue && Array.isArray(state.list)) {{
+                return state.list.slice();
+            }}
+            return (serverWatchlist || []).slice();
+        }}
+
+        function addSymbolToWatchlist(sym){{
+            var list = getWorkingWatchlist();
+            if (!list.includes(sym)) {{
+                list.push(sym);
+            }}
+            writeLocalWatchlist(list);
+            try {{ localStorage.setItem('selectedSymbol', sym); }} catch (e) {{}}
+            sendEvent({{ type: 'add', symbol: sym, watchlist: list, selected: sym }});
+        }}
+
+        function addSymbolFromInput(){{
+            var input = document.getElementById('watchSearch');
+            if (!input) return;
+            var sym = normalizeSymbol(input.value);
+            if (!sym) return;
+            var list = getWorkingWatchlist();
+            if (list.includes(sym)) {{
+                switchSymbol(null, sym);
+                return;
+            }}
+            addSymbolToWatchlist(sym);
+        }}
+
+        function addTopSearchResult(){{
+            var first = document.querySelector('#searchResults .search-item');
+            if (first && first.dataset && first.dataset.symbol) {{
+                addSymbolToWatchlist(first.dataset.symbol);
+                return;
+            }}
+            addSymbolFromInput();
+        }}
+
+        function removeSymbol(evt, symbol){{
+            if (evt) evt.stopPropagation();
+            var list = getWorkingWatchlist().filter(function(item) {{
+                return item !== symbol;
+            }});
+            var nextSelected = currentSymbol;
+            if (symbol === currentSymbol) {{
+                nextSelected = list.length ? list[0] : '';
+            }}
+            writeLocalWatchlist(list);
+            if (nextSelected) {{
+                try {{ localStorage.setItem('selectedSymbol', nextSelected); }} catch (e) {{}}
+            }} else {{
+                try {{ localStorage.removeItem('selectedSymbol'); }} catch (e) {{}}
+            }}
+            sendEvent({{ type: 'remove', symbol: symbol, watchlist: list, selected: nextSelected }});
         }}
 
         function updateViewControls(){{
@@ -1285,7 +2458,7 @@ def build_html_component(data):
             var clickEvent = evt || window.event;
             if (clickEvent && clickEvent.target && clickEvent.target.closest('.drag-handle')) return;
             if(!symbolData[symbol]) {{
-                setParentParam('sel', symbol, true);
+                sendEvent({{ type: 'select', symbol: symbol, watchlist: getWorkingWatchlist(), selected: symbol }});
                 return;
             }}
             currentSymbol = symbol;
@@ -1296,7 +2469,6 @@ def build_html_component(data):
             chart.timeScale().fitContent();
             updateHeaderForSymbol(symbol);
             updateActive(symbol);
-            setParentParam('sel', symbol, false);
             try {{ localStorage.setItem('selectedSymbol', symbol); }} catch(e) {{}}
         }}
 
@@ -1311,25 +2483,113 @@ def build_html_component(data):
         }}
         if(toggleSMA) toggleSMA.addEventListener('change', applyIndicatorState);
         if(toggleEMA) toggleEMA.addEventListener('change', applyIndicatorState);
+        var searchInput = document.getElementById('watchSearch');
+        if (searchInput) {{
+            searchInput.addEventListener('input', function(){{
+                debouncedSearch();
+            }});
+            searchInput.addEventListener('keydown', function(e){{
+                if (e.key === 'Enter') {{
+                    addTopSearchResult();
+                }}
+            }});
+        }}
+        var searchBtn = document.getElementById('watchSearchBtn');
+        if (searchBtn) {{
+            searchBtn.addEventListener('click', function(){{
+                addTopSearchResult();
+            }});
+        }}
+        var addBtn = document.getElementById('watchAddBtn');
+        if (addBtn) {{
+            addBtn.addEventListener('click', function(){{
+                addSymbolFromInput();
+            }});
+        }}
+        var searchResultsEl = document.getElementById('searchResults');
+        if (searchResultsEl) {{
+            searchResultsEl.addEventListener('click', function(e){{
+                var item = e.target.closest('.search-item');
+                if (!item) return;
+                var sym = item.dataset.symbol;
+                if (sym) {{
+                    addSymbolToWatchlist(sym);
+                }}
+            }});
+        }}
+        var symbolToggle = document.getElementById('symbolToggle');
+        var symbolMenu = document.getElementById('symbolMenu');
+        var symbolMenuSearch = document.getElementById('symbolMenuSearch');
+        function closeSymbolMenu(){{
+            if (symbolMenu) symbolMenu.classList.remove('active');
+        }}
+        function toggleSymbolMenu(){{
+            if (!symbolMenu) return;
+            symbolMenu.classList.toggle('active');
+            if (symbolMenu.classList.contains('active') && symbolMenuSearch) {{
+                symbolMenuSearch.focus();
+            }}
+        }}
+        if (symbolToggle) {{
+            symbolToggle.addEventListener('click', function(e){{
+                e.stopPropagation();
+                toggleSymbolMenu();
+            }});
+        }}
+        if (symbolMenuSearch) {{
+            symbolMenuSearch.addEventListener('input', function(){{
+                var q = normalizeSymbol(symbolMenuSearch.value);
+                document.querySelectorAll('.symbol-menu-item').forEach(function(item){{
+                    var sym = (item.dataset.symbol || "").toUpperCase();
+                    var name = (item.dataset.name || "").toUpperCase();
+                    var match = !q || sym.indexOf(q) >= 0 || name.indexOf(q) >= 0;
+                    item.style.display = match ? '' : 'none';
+                }});
+            }});
+        }}
+        document.querySelectorAll('.symbol-menu-item').forEach(function(item){{
+            item.addEventListener('click', function(){{
+                var sym = item.dataset.symbol;
+                if (sym) {{
+                    switchSymbol(null, sym);
+                    closeSymbolMenu();
+                }}
+            }});
+        }});
+        if (window._fvDocClickHandler) {{
+            try {{ document.removeEventListener('click', window._fvDocClickHandler); }} catch (e) {{}}
+        }}
+        window._fvDocClickHandler = function(e) {{
+            if (!symbolMenu || !symbolMenu.classList.contains('active')) return;
+            if (symbolMenu.contains(e.target)) return;
+            if (symbolToggle && symbolToggle.contains(e.target)) return;
+            closeSymbolMenu();
+        }};
+        document.addEventListener('click', window._fvDocClickHandler);
         document.querySelectorAll('.tf-btn').forEach(function(btn){{
             btn.addEventListener('click', function(){{
                 var tf = btn.dataset.tf;
                 if (tf && tf !== currentTf) {{
-                    setParentParam('tf', tf, true);
+                    sendEvent({{ type: 'timeframe', timeframe: tf, watchlist: getWorkingWatchlist(), selected: currentSymbol }});
                 }}
             }});
         }});
         var extToggleEl = document.getElementById('extToggle');
         if (extToggleEl) {{
             extToggleEl.addEventListener('click', function(){{
-                var nextExt = currentExt ? "0" : "1";
-                setParentParam('ext', nextExt, true);
+                var nextExt = !currentExt;
+                sendEvent({{ type: 'ext', extended: nextExt, watchlist: getWorkingWatchlist(), selected: currentSymbol }});
             }});
         }}
+        sendEvent({{ type: 'ready', status: 'ready' }});
+        syncFromLocalStorage();
         updateViewControls();
         updateWarning();
         if(initialSymbol) {{
             switchSymbol(null, initialSymbol);
+        }}
+        if (currentSearch && currentSearch.length >= 2) {{
+            performLiveSearch(currentSearch);
         }}
 
         chart.subscribeCrosshairMove(function(p){{
@@ -1349,172 +2609,39 @@ def build_html_component(data):
 </html>"""
 
 # ══════════════════════════════════════════════════════════════════════════════
-sel = st.session_state.selected
-tf  = st.session_state.timeframe
-ext = st.session_state.extended
-wl  = st.session_state.watchlist
-quotes = get_all_quotes(tuple(wl))
+_component_frontend = Path(__file__).parent / "fadingview_component" / "frontend"
+_build_dir = _component_frontend / "build"
+_dist_dir = _component_frontend / "dist"
+if (_build_dir / "index.html").exists():
+    _component_path = _build_dir
+elif (_dist_dir / "index.html").exists():
+    _component_path = _dist_dir
+else:
+    raise RuntimeError(
+        "Component not built. Run npm run build in fadingview_component/frontend."
+    )
 
-# ── DATA ASSEMBLY & RENDER ───────────────────────────────────────────────────
-if not sel:
-    st.info("Add a symbol to get started."); st.stop()
+component_func = components.declare_component(
+    "fadingview",
+    path=str(_component_path),
+)
 
-def _fmt_last(v):
-    return f"{v:,.2f}" if v is not None else "--"
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["SPY", "QQQ", "AAPL"]
+if "selected_symbol" not in st.session_state:
+    st.session_state.selected_symbol = "SPY"
+if "chart_data" not in st.session_state:
+    st.session_state.chart_data = {}
 
-def _fmt_vol(v):
-    if v is None:
-        return "--"
-    if v >= 1e9:
-        return f"{v/1e9:.2f}B"
-    if v >= 1e6:
-        return f"{v/1e6:.2f}M"
-    if v >= 1e3:
-        return f"{v/1e3:.2f}K"
-    return f"{v:.0f}"
+component_event = component_func(
+    watchlist=st.session_state.watchlist,
+    selected=st.session_state.selected_symbol,
+    chart_data=st.session_state.chart_data.get(st.session_state.selected_symbol, []),
+    key="fv_main",
+    height=800,
+)
 
-# Gather ticker info
-ticker_info = {}
-for tk in wl:
-    n, ex_name, _ = get_info(tk)
-    ticker_info[tk] = {"name": n, "exchange": ex_name}
-
-symbol_data = {}
-for tk in wl:
-    df_t = fetch_ohlcv(tk, tf, ext)
-    effective_tf = tf
-    effective_ext = ext
-    if df_t.empty and tf not in ("1D", "1W"):
-        df_t = fetch_ohlcv(tk, "1D", False)
-        effective_tf = "1D"
-        effective_ext = False
-    if df_t.empty:
-        continue
-    L = df_t.iloc[-1]
-    cl = float(L["Close"])
-    pv = float(df_t["Close"].iloc[-2]) if len(df_t) > 1 else cl
-    sv = float(L["SMA20"]) if pd.notna(L.get("SMA20")) else None
-    ev = float(L["EMA50"]) if pd.notna(L.get("EMA50")) else None
-
-    cnd, sma20, ema50 = [], [], []
-    for ts, r in df_t.iterrows():
-        t = int(ts.timestamp())
-        cnd.append({
-            "time": t,
-            "open": round(float(r["Open"]), 2),
-            "high": round(float(r["High"]), 2),
-            "low": round(float(r["Low"]), 2),
-            "close": round(float(r["Close"]), 2),
-        })
-        if pd.notna(r.get("SMA20")):
-            sma20.append({"time": t, "value": round(float(r["SMA20"]), 2)})
-        if pd.notna(r.get("EMA50")):
-            ema50.append({"time": t, "value": round(float(r["EMA50"]), 2)})
-
-    last_ts = df_t.index[-1]
-    if effective_tf in ("1D", "1W"):
-        session_df = df_t.tail(1)
-    else:
-        last_day = last_ts.date()
-        session_df = df_t[df_t.index.date == last_day]
-    session_high = float(session_df["High"].max()) if not session_df.empty else float(L["High"])
-    session_low = float(session_df["Low"].min()) if not session_df.empty else float(L["Low"])
-    if "Volume" in session_df.columns:
-        session_vol = float(session_df["Volume"].sum())
-        if pd.isna(session_vol):
-            session_vol = None
-    else:
-        session_vol = None
-    if pd.isna(session_high):
-        session_high = float(L["High"])
-    if pd.isna(session_low):
-        session_low = float(L["Low"])
-    time_str = last_ts.strftime("%H:%M")
-
-    chg_val = cl - pv
-    chg_pct = (chg_val / pv * 100) if pv else 0
-    price_color = UP if chg_val >= 0 else DOWN
-    chg_sign = "+" if chg_val >= 0 else ""
-    ex_name = ticker_info.get(tk, {}).get("exchange", "")
-    session_tag = "RTH" if effective_tf in ("1D", "1W") else ("EXT" if effective_ext else "RTH")
-    meta_text = f"{ex_name} · {effective_tf.upper()} · {session_tag}" if ex_name else f"{effective_tf.upper()} · {session_tag}"
-
-    symbol_data[tk] = {
-        "candles": cnd,
-        "sma20": sma20,
-        "ema50": ema50,
-        "last": {
-            "o": round(float(L["Open"]), 2),
-            "h": round(float(L["High"]), 2),
-            "l": round(float(L["Low"]), 2),
-            "c": round(cl, 2),
-            "s": round(sv, 2) if sv is not None else None,
-            "e": round(ev, 2) if ev is not None else None,
-        },
-        "panel": {
-            "open": round(float(L["Open"]), 2),
-            "high": round(session_high, 2),
-            "low": round(session_low, 2),
-            "volume": round(session_vol, 0) if session_vol is not None else None,
-            "time_str": time_str,
-            "status": session_tag,
-        },
-        "meta_text": meta_text,
-        "price_color": price_color,
-        "chg_str": f"{chg_sign}{chg_val:,.2f}",
-        "chg_pct_str": f"{chg_sign}{chg_pct:.2f}%",
-    }
-
-if not symbol_data:
-    st.error(f"No data for watchlist symbols on {tf}."); st.stop()
-
-missing_symbol = None
-if sel not in symbol_data:
-    missing_symbol = sel
-    sel = next(iter(symbol_data.keys()))
-    st.session_state.selected = sel
-
-selected_data = symbol_data[sel]
-missing_message = f"No data for {missing_symbol}" if missing_symbol else ""
-data_status = {tk: tk in symbol_data for tk in wl}
-panel_fmt = {
-    "status": selected_data["panel"]["status"],
-    "open": _fmt_last(selected_data["panel"]["open"]),
-    "high": _fmt_last(selected_data["panel"]["high"]),
-    "low": _fmt_last(selected_data["panel"]["low"]),
-    "volume": _fmt_vol(selected_data["panel"]["volume"]),
-    "time_str": selected_data["panel"]["time_str"] or "--",
-    "ema": _fmt_last(selected_data["last"]["e"]),
-}
-
-sparklines = get_sparklines(tuple(wl))
-ticker_names = {tk: info["name"] for tk, info in ticker_info.items()}
-
-component_data = {
-    "selected": sel,
-    "timeframe": tf,
-    "is_ext": ext,
-    "watchlist": wl,
-    "quotes": quotes,
-    "sparklines": sparklines,
-    "ticker_names": ticker_names,
-    "data_status": data_status,
-    "missing_symbol": missing_symbol,
-    "missing_message": missing_message,
-    "symbol_data": symbol_data,
-    "meta_text": selected_data["meta_text"],
-    "last": {
-        "o": _fmt_last(selected_data["last"]["o"]),
-        "h": _fmt_last(selected_data["last"]["h"]),
-        "l": _fmt_last(selected_data["last"]["l"]),
-        "c": _fmt_last(selected_data["last"]["c"]),
-        "s": _fmt_last(selected_data["last"]["s"]),
-    },
-    "price_color": selected_data["price_color"],
-    "chg_str": selected_data["chg_str"],
-    "chg_pct_str": selected_data["chg_pct_str"],
-    "panel_fmt": panel_fmt,
-}
-
-# IMPORTANT: Increase height to allow full view as body is 100vh
-components.html(build_html_component(component_data), height=950, scrolling=False)
+if component_event:
+    needs_rerun = handle_component_event(component_event)
+    if needs_rerun:
+        st.rerun()
