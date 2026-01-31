@@ -8,6 +8,7 @@ if (!window._FV_STATE) {
     chart: null,
     splitInstance: null,
     sortableInstance: null,
+    requestedSymbols: new Set(),
   };
 }
 
@@ -85,8 +86,10 @@ function updateData(args) {
     });
   }
 
-  if (args.chart_data && window.LightweightCharts) {
+  if (args.chart_data && args.chart_data.length && window.LightweightCharts) {
     updateChart(args.chart_data, args.selected);
+  } else if (state.selected) {
+    requestData(state.selected);
   }
 }
 
@@ -110,11 +113,7 @@ function selectSymbol(symbol) {
   state.selected = symbol;
   renderWatchlist();
 
-  Streamlit.setComponentValue({
-    type: "request_data",
-    symbol,
-    timestamp: Date.now(),
-  });
+  requestData(symbol, true);
 }
 
 function removeSymbol(symbol, event) {
@@ -189,7 +188,20 @@ function updateChart(data) {
     grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
   });
 
-  const candleSeries = chart.addCandlestickSeries();
+  let candleSeries = null;
+  if (typeof chart.addCandlestickSeries === "function") {
+    candleSeries = chart.addCandlestickSeries();
+  } else if (typeof chart.addSeries === "function") {
+    const seriesType =
+      window.LightweightCharts.CandlestickSeries ||
+      (window.LightweightCharts.SeriesType
+        ? window.LightweightCharts.SeriesType.Candlestick
+        : null);
+    if (seriesType) {
+      candleSeries = chart.addSeries(seriesType, {});
+    }
+  }
+  if (!candleSeries) return;
   const formattedData = data.map((d) => ({
     time: new Date(d.Datetime || d.Date).getTime() / 1000,
     open: d.Open,
@@ -214,6 +226,18 @@ function arraysEqual(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   if (a.length !== b.length) return false;
   return a.every((val, i) => val === b[i]);
+}
+
+function requestData(symbol, force = false) {
+  const sym = String(symbol || "").toUpperCase().trim();
+  if (!sym) return;
+  if (!force && state.requestedSymbols.has(sym)) return;
+  state.requestedSymbols.add(sym);
+  Streamlit.setComponentValue({
+    type: "request_data",
+    symbol: sym,
+    timestamp: Date.now(),
+  });
 }
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);

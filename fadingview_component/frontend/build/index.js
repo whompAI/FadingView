@@ -13517,7 +13517,8 @@ return true;`);
       selected: null,
       chart: null,
       splitInstance: null,
-      sortableInstance: null
+      sortableInstance: null,
+      requestedSymbols: /* @__PURE__ */ new Set()
     };
   }
   var state = window._FV_STATE;
@@ -13579,8 +13580,10 @@ return true;`);
         el.style.background = el.dataset.symbol === args.selected ? "#238636" : "transparent";
       });
     }
-    if (args.chart_data && window.LightweightCharts) {
+    if (args.chart_data && args.chart_data.length && window.LightweightCharts) {
       updateChart(args.chart_data, args.selected);
+    } else if (state.selected) {
+      requestData(state.selected);
     }
   }
   function addSymbol(symbol) {
@@ -13598,11 +13601,7 @@ return true;`);
   function selectSymbol(symbol) {
     state.selected = symbol;
     renderWatchlist();
-    Streamlit.setComponentValue({
-      type: "request_data",
-      symbol,
-      timestamp: Date.now()
-    });
+    requestData(symbol, true);
   }
   function removeSymbol(symbol, event) {
     event.stopPropagation();
@@ -13663,7 +13662,16 @@ return true;`);
       layout: { background: { color: "#0d1117" }, textColor: "#c9d1d9" },
       grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } }
     });
-    const candleSeries = chart.addCandlestickSeries();
+    let candleSeries = null;
+    if (typeof chart.addCandlestickSeries === "function") {
+      candleSeries = chart.addCandlestickSeries();
+    } else if (typeof chart.addSeries === "function") {
+      const seriesType = window.LightweightCharts.CandlestickSeries || (window.LightweightCharts.SeriesType ? window.LightweightCharts.SeriesType.Candlestick : null);
+      if (seriesType) {
+        candleSeries = chart.addSeries(seriesType, {});
+      }
+    }
+    if (!candleSeries) return;
     const formattedData = data.map((d) => ({
       time: new Date(d.Datetime || d.Date).getTime() / 1e3,
       open: d.Open,
@@ -13684,6 +13692,17 @@ return true;`);
     if (!Array.isArray(a) || !Array.isArray(b)) return false;
     if (a.length !== b.length) return false;
     return a.every((val, i) => val === b[i]);
+  }
+  function requestData(symbol, force = false) {
+    const sym = String(symbol || "").toUpperCase().trim();
+    if (!sym) return;
+    if (!force && state.requestedSymbols.has(sym)) return;
+    state.requestedSymbols.add(sym);
+    Streamlit.setComponentValue({
+      type: "request_data",
+      symbol: sym,
+      timestamp: Date.now()
+    });
   }
   Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
   Streamlit.setComponentReady();
