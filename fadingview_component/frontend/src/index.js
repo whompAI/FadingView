@@ -70,7 +70,6 @@ function initializeApp() {
   }
 
   setupEventListeners();
-  Streamlit.setComponentReady();
 }
 
 function updateData(args) {
@@ -218,4 +217,5 @@ function arraysEqual(a, b) {
 }
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+Streamlit.setComponentReady();
 Streamlit.setFrameHeight(800);

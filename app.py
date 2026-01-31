@@ -79,9 +79,18 @@ def handle_component_event(event):
         try:
             data = yf.download(symbol, period="1d", interval="5m", progress=False)
             if not data.empty:
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = [
+                        "_".join([str(part) for part in col if part])
+                        for col in data.columns.values
+                    ]
+                data.index.name = data.index.name or "Datetime"
+                records = json.loads(
+                    data.reset_index().to_json(orient="records", date_format="iso")
+                )
                 if "chart_data" not in st.session_state:
                     st.session_state.chart_data = {}
-                st.session_state.chart_data[symbol] = data.reset_index().to_dict("records")
+                st.session_state.chart_data[symbol] = records
                 return True
         except Exception as exc:
             st.session_state[f"error_{symbol}"] = str(exc)
@@ -2609,7 +2618,7 @@ def build_html_component(data):
 </html>"""
 
 # ══════════════════════════════════════════════════════════════════════════════
-_component_frontend = Path(__file__).parent / "fadingview_component" / "frontend"
+_component_frontend = Path(__file__).resolve().parent / "fadingview_component" / "frontend"
 _build_dir = _component_frontend / "build"
 _dist_dir = _component_frontend / "dist"
 if (_build_dir / "index.html").exists():
@@ -2623,7 +2632,7 @@ else:
 
 component_func = components.declare_component(
     "fadingview",
-    path=str(_component_path),
+    path=str(_component_path.resolve()),
 )
 
 if "watchlist" not in st.session_state:

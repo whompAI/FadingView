@@ -13567,7 +13567,6 @@ return true;`);
       }
     }
     setupEventListeners();
-    Streamlit.setComponentReady();
   }
   function updateData(args) {
     if (args.watchlist && !arraysEqual(args.watchlist, state.watchlist)) {
@@ -13687,6 +13686,7 @@ return true;`);
     return a.every((val, i) => val === b[i]);
   }
   Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+  Streamlit.setComponentReady();
   Streamlit.setFrameHeight(800);
 })();
 /*! Bundled license information:
