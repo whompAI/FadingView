@@ -407,10 +407,18 @@ export default function Home() {
     const canvasOnly = embed && chromeOff && mode === "canvas";
 
     return { embed, chromeOff, mode, seed, canvasOnly };
-  }, [selected]);
+  }, []);
 
   const normalizeSymbol = (value: string): string =>
     value.toUpperCase().trim().replace(/[^A-Z0-9=.\-^/]/g, "");
+
+  const embedSymbol = useMemo<string | null>(() => {
+    if (!embedConfig.embed || typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    const symbolParam = params.get("symbol");
+    const normalized = normalizeSymbol(symbolParam ?? "");
+    return normalized || null;
+  }, [embedConfig.embed]);
 
   const isRthSession = () => {
     try {
@@ -498,6 +506,15 @@ export default function Home() {
   useEffect(() => {
     const storedWatchlist = window.localStorage.getItem("fv_watchlist");
     const storedSelected = window.localStorage.getItem("fv_selected");
+    if (embedConfig.embed && embedSymbol) {
+      setSelected(embedSymbol);
+      setWatchlist((prev) => {
+        if (prev.includes(embedSymbol)) return prev;
+        return [embedSymbol, ...prev].slice(0, MAX_WATCHLIST);
+      });
+      return;
+    }
+
     if (storedWatchlist) {
       try {
         const parsed = JSON.parse(storedWatchlist);
@@ -536,7 +553,7 @@ export default function Home() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const symbolParam = params.get("symbol");
+    const symbolParam = embedSymbol || params.get("symbol");
     const tfParam = params.get("tf");
     const extParam = params.get("ext");
     const allFrames = [...ADVANCED_TIMEFRAMES, ...CORE_TIMEFRAMES];
@@ -568,6 +585,18 @@ export default function Home() {
     urlStateReadyRef.current = true;
   }, []);
 
+  // Guardrail: embed mode is canonically driven by query symbol.
+  useEffect(() => {
+    if (!embedConfig.embed || !embedSymbol) return;
+    if (selected !== embedSymbol) {
+      setSelected(embedSymbol);
+      setWatchlist((prev) => {
+        if (prev.includes(embedSymbol)) return prev;
+        return [embedSymbol, ...prev].slice(0, MAX_WATCHLIST);
+      });
+    }
+  }, [embedConfig.embed, embedSymbol, selected]);
+
   useEffect(() => {
     const storedIndicators = window.localStorage.getItem("fv_indicators");
     if (!storedIndicators) return;
@@ -598,6 +627,8 @@ export default function Home() {
 
   useEffect(() => {
     if (!urlStateReadyRef.current || !selected) return;
+    if (embedConfig.embed) return;
+
     const url = new URL(window.location.href);
     url.searchParams.set("symbol", selected);
     url.searchParams.set("tf", timeframe);
