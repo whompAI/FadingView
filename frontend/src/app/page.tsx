@@ -404,7 +404,7 @@ export default function Home() {
     const chromeOff = params.get("chrome") === "0";
     const mode = (params.get("mode") || "").toLowerCase();
     const seed = params.get("seed") || "";
-    const canvasOnly = embed && chromeOff && (mode === "canvas" || mode === "");
+    const canvasOnly = embed && (chromeOff || mode === "canvas" || mode === "");
 
     return { embed, chromeOff, mode, seed, canvasOnly };
   }, []);

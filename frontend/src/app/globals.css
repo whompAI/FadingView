@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap");
 @import "tailwindcss";
 
 * {
@@ -17,7 +17,7 @@
   --down: #ff5a5f;
   --accent: #00d084;
   --blue: #3cc4ff;
-  --font-sans: "Space Grotesk", "Inter", "Helvetica Neue", sans-serif;
+  --font-sans: "Inter", "Helvetica Neue", sans-serif;
   --font-mono: "IBM Plex Mono", "SF Mono", "Fira Code", monospace;
 }
 
