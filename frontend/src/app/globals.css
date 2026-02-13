@@ -29,12 +29,22 @@ body {
 html.whomp-embed,
 html.whomp-embed body {
   height: 100%;
+  width: 100%;
   margin: 0;
   overflow: hidden;
 }
 
 html.whomp-embed body {
+  min-height: 100%;
+  min-width: 100%;
   overflow: hidden;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+html.whomp-embed body::before,
+html.whomp-embed body::after {
+  display: none !important;
 }
 
 html.whomp-embed #__next,
@@ -44,6 +54,8 @@ html.whomp-embed .chart-embed-shell {
   height: 100%;
   min-height: 100%;
   overflow: hidden;
+  width: 100%;
+  max-width: 100%;
 }
 
 body {
@@ -733,18 +745,29 @@ body {
   background: var(--bg-dark);
   overflow: hidden;
   height: 100vh;
+  height: 100dvh;
   width: 100vw;
+  width: 100dvw;
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .chart-stage--embed {
   min-height: 100%;
   height: 100%;
   overflow: hidden;
+  width: 100%;
 }
 
 .chart-container--embed {
   min-height: 100%;
   height: 100%;
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
 }
 
 .rsi-container--embed {

@@ -2281,7 +2281,11 @@ export default function Home() {
     return (
       <div className="chart-embed-shell">
         <div className="chart-stage chart-stage--embed">
-          <div className="chart-container chart-container--embed" ref={chartRef} />
+          <div
+            className="chart-container chart-container--embed"
+            ref={chartRef}
+            aria-label="Embedded chart canvas"
+          />
         </div>
       </div>
     );
