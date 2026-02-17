@@ -197,6 +197,7 @@ const MAX_WATCHLIST = 50;
 const DEFAULT_WATCHLIST_WIDTH = 360;
 const MIN_WATCHLIST_WIDTH = 320;
 const MIN_CHART_WIDTH = 460;
+const WATCHLIST_HANDLE_WIDTH = 14;
 const DEFAULT_WATCHLIST_LIST_HEIGHT = 210;
 const MIN_WATCHLIST_LIST_HEIGHT = 120;
 const MIN_WATCHLIST_DETAIL_HEIGHT = 220;
@@ -477,12 +478,16 @@ export default function Home() {
       const container = mainContainerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      const maxWidth = Math.max(MIN_WATCHLIST_WIDTH, Math.floor(rect.width - MIN_CHART_WIDTH));
+      const maxWidth = Math.max(
+        MIN_WATCHLIST_WIDTH,
+        Math.floor(rect.width - WATCHLIST_HANDLE_WIDTH - MIN_CHART_WIDTH)
+      );
       const nextWidth = Math.max(MIN_WATCHLIST_WIDTH, Math.min(watchlistWidthRef.current, maxWidth));
       if (nextWidth !== watchlistWidthRef.current) {
         setWatchlistWidth(nextWidth);
         watchlistWidthRef.current = nextWidth;
       }
+      container.style.setProperty("--watchlist-width", `${watchlistWidthRef.current}px`);
     };
     const id = window.setTimeout(clampWidth, 0);
     window.addEventListener("resize", clampWidth);
@@ -1442,6 +1447,11 @@ export default function Home() {
     return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
   }, []);
 
+  const applyWatchlistWidthCssVar = useCallback((width: number) => {
+    if (!mainContainerRef.current) return;
+    mainContainerRef.current.style.setProperty("--watchlist-width", `${width}px`);
+  }, []);
+
   const applyWatchlistResize = useCallback((clientX: number) => {
     const state = watchlistResizeStateRef.current;
     if (!state.active) return;
@@ -1455,11 +1465,9 @@ export default function Home() {
     if (watchlistResizeFrameRef.current != null) return;
     watchlistResizeFrameRef.current = window.requestAnimationFrame(() => {
       watchlistResizeFrameRef.current = null;
-      if (watchlistSectionRef.current) {
-        watchlistSectionRef.current.style.width = `${watchlistWidthRef.current}px`;
-      }
+      applyWatchlistWidthCssVar(watchlistWidthRef.current);
     });
-  }, []);
+  }, [applyWatchlistWidthCssVar]);
 
   const stopWatchlistResize = useCallback(() => {
     const state = watchlistResizeStateRef.current;
@@ -1471,13 +1479,11 @@ export default function Home() {
       window.cancelAnimationFrame(watchlistResizeFrameRef.current);
       watchlistResizeFrameRef.current = null;
     }
-    if (watchlistSectionRef.current) {
-      watchlistSectionRef.current.style.width = `${watchlistWidthRef.current}px`;
-    }
+    applyWatchlistWidthCssVar(watchlistWidthRef.current);
     setWatchlistWidth(watchlistWidthRef.current);
     document.body.style.removeProperty("user-select");
     document.body.style.removeProperty("cursor");
-  }, []);
+  }, [applyWatchlistWidthCssVar]);
 
   const startWatchlistResize = useCallback(
     (clientX: number, pointerId: number) => {
@@ -1486,7 +1492,7 @@ export default function Home() {
       const rect = container.getBoundingClientRect();
       const maxWidth = Math.max(
         MIN_WATCHLIST_WIDTH,
-        Math.floor(rect.width - MIN_CHART_WIDTH)
+        Math.floor(rect.width - WATCHLIST_HANDLE_WIDTH - MIN_CHART_WIDTH)
       );
       const startWidth = Math.max(
         MIN_WATCHLIST_WIDTH,
@@ -1502,11 +1508,12 @@ export default function Home() {
       };
       setWatchlistWidth(startWidth);
       watchlistWidthRef.current = startWidth;
+      applyWatchlistWidthCssVar(startWidth);
       setIsResizingWatchlist(true);
       document.body.style.userSelect = "none";
       document.body.style.cursor = "col-resize";
     },
-    []
+    [applyWatchlistWidthCssVar]
   );
 
   const onWatchlistPointerDown = useCallback(
@@ -2698,7 +2705,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="main-container" ref={mainContainerRef}>
+      <div className="main-container" ref={mainContainerRef} data-watchlist-width={watchlistWidth}>
         <div className="chart-section">
           <div className="chart-header">
             <div className="chart-ohlc">
@@ -2807,7 +2814,6 @@ export default function Home() {
         <aside
           className="watchlist-section"
           ref={watchlistSectionRef}
-          style={{ width: `${watchlistWidthRef.current}px` }}
         >
           <div className="watchlist-header">
             <span>Watchlist</span>

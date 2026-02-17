@@ -575,21 +575,24 @@ body {
 }
 
 .main-container {
-  display: flex;
+  --watchlist-width: 360px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px var(--watchlist-width);
   flex: 1;
   min-height: 0;
+  min-width: 0;
   height: calc(100vh - 56px);
   position: relative;
 }
 
 .chart-section {
-  flex: 1;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, rgba(15, 23, 20, 0.48), rgba(11, 15, 13, 0.96));
   border-right: 1px solid var(--border);
   position: relative;
   min-height: 600px;
+  min-width: 0;
   height: 100%;
 }
 
@@ -872,12 +875,11 @@ body {
 }
 
 .watchlist-section {
-  width: 360px;
-  min-width: 320px;
+  width: auto;
+  min-width: 0;
   background: linear-gradient(180deg, rgba(17, 27, 23, 0.96), rgba(13, 20, 17, 0.98));
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -1551,6 +1553,7 @@ body {
   }
 
   .main-container {
+    display: flex;
     flex-direction: column;
   }
 
