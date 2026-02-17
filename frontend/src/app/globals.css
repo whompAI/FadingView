@@ -201,6 +201,14 @@ body {
   min-width: 0;
 }
 
+.tv-actions {
+  margin-left: auto;
+}
+
+.tv-status {
+  display: none;
+}
+
 .tv-symbol {
   display: flex;
   flex-direction: column;
