@@ -2664,11 +2664,6 @@ export default function Home() {
                   {watchlistFreshnessLabel}
                 </span>
               </div>
-              {!sessionAuthorized ? (
-                <button className="chart-chip watch-auth" onClick={() => setShowLogin(true)} title="Sign in to sync watchlist across devices">
-                  Sign in
-                </button>
-              ) : null}
               <span className={"chart-chip watch-sync " + "watch-sync-" + syncState} title="Watchlist sync status">
                 {syncState === "synced" ? "Synced" : syncState === "syncing" ? "Syncing" : syncState === "error" ? "Sync error" : "Local"}
               </span>

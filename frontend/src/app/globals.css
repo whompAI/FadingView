@@ -925,8 +925,19 @@ body {
 
 .watchlist-meta {
   display: inline-flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  row-gap: 6px;
+  max-width: calc(100% - 22px);
+}
+
+.watchlist-title-meta {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .chart-chip {
