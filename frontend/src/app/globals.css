@@ -288,6 +288,17 @@ body {
   line-height: 1.2;
 }
 
+.chart-countdown {
+  margin-left: 8px;
+  font-size: 9px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  color: #a6dbff;
+  letter-spacing: 0.35px;
+  border-color: rgba(122, 179, 255, 0.42);
+  background: rgba(122, 179, 255, 0.08);
+}
+
 .session-badge {
   font-size: 9px;
   letter-spacing: 0.6px;
@@ -895,31 +906,58 @@ body {
 
 .watchlist-header {
   padding: 10px 12px;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
   border-bottom: 1px solid var(--border);
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 10px;
+}
+
+.watchlist-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.watchlist-title-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .watchlist-meta {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.watchlist-count {
+.chart-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 9px;
+  line-height: 1.2;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
   color: var(--text-secondary);
 }
 
 .watchlist-state {
-  font-size: 9px;
-  letter-spacing: 0.9px;
-  text-transform: uppercase;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 5px;
+  font-size: 8px;
+  letter-spacing: 0.8px;
+  padding: 2px 6px;
 }
 
 .watchlist-state.is-live {
@@ -933,10 +971,67 @@ body {
 }
 
 .watchlist-updated {
-  font-size: 10px;
+  font-size: 9px;
   text-transform: none;
   letter-spacing: 0.2px;
   color: var(--text-secondary);
+}
+
+.watch-auth {
+  text-transform: none;
+}
+
+.watch-sync {
+  text-transform: none;
+}
+
+.watch-sync-synced {
+  color: #85e8bf;
+  border-color: rgba(0, 208, 132, 0.45);
+}
+
+.watch-sync-syncing {
+  color: #9cb4ff;
+  border-color: rgba(122, 179, 255, 0.45);
+}
+
+.watch-sync-error {
+  color: #ff7f84;
+  border-color: rgba(255, 90, 95, 0.55);
+}
+
+.watch-sync-local {
+  color: var(--text-secondary);
+  border-color: rgba(106, 122, 115, 0.5);
+}
+
+.watchlist-count {
+  color: var(--text-primary);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.watchlist-split-handle {
+  height: 10px;
+  flex: 0 0 10px;
+  cursor: row-resize;
+  position: relative;
+  background: rgba(11, 15, 13, 0.5);
+}
+
+.watchlist-split-handle::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 4px;
+  height: 2px;
+  background: rgba(106, 122, 115, 0.45);
+  border-radius: 999px;
+}
+
+.watchlist-split-handle:hover::before {
+  background: rgba(122, 179, 255, 0.7);
 }
 
 .watchlist-controls {
@@ -1192,13 +1287,15 @@ body {
   font-weight: 600;
   letter-spacing: 0.4px;
   font-size: 11px;
+  line-height: 1.1;
 }
 
 .sym-name {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.4px;
+  line-height: 1.1;
 }
 
 .sparkline {

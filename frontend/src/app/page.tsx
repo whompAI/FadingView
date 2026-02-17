@@ -2326,10 +2326,7 @@ export default function Home() {
               >
                 {headerChange != null ? formatSigned(headerChange, "%") : "--"}
               </div>
-              <div className="tv-countdown" title="Time until next candle boundary.">
-                {candleCountdownLabel}
-              </div>
-            </div>
+</div>
           </div>
         </div>
         <div className="tv-center">
@@ -2546,8 +2543,13 @@ export default function Home() {
                   </span>
                 </>
               ) : (
-                <span>Loading OHLC...</span>
+                <>
+                  <span>Loading OHLC...</span>
+                </>
               )}
+              <span className="chart-countdown tv-countdown" title="Time until next candle boundary.">
+                {candleCountdownLabel}
+              </span>
             </div>
             <div className="chart-meta">
               <div className="chart-status">
