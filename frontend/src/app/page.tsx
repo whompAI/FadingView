@@ -2602,20 +2602,22 @@ export default function Home() {
               <div className="tv-last">
                 {headerPrice != null ? formatPrice(headerPrice) : "--"}
               </div>
-              <div
-                className={`tv-change ${
-                  headerChange != null && headerChange !== 0
-                    ? headerChange > 0
-                      ? "change-up"
-                      : "change-down"
-                    : ""
-                }`}
-              >
-                {headerChange != null ? formatSigned(headerChange, "%") : "--"}
+              <div className="tv-change-stack">
+                {headerSessionLabel && (
+                  <span className="session-badge session-inline">{headerSessionLabel}</span>
+                )}
+                <div
+                  className={`tv-change ${
+                    headerChange != null && headerChange !== 0
+                      ? headerChange > 0
+                        ? "change-up"
+                        : "change-down"
+                      : ""
+                  }`}
+                >
+                  {headerChange != null ? formatSigned(headerChange, "%") : "--"}
+                </div>
               </div>
-              {headerSessionLabel && (
-                <span className="session-badge session-inline">{headerSessionLabel}</span>
-              )}
             </div>
           </div>
         </div>

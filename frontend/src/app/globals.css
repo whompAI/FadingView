@@ -269,6 +269,14 @@ body {
   min-width: 0;
 }
 
+.tv-change-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+}
+
 .tv-last {
   font-size: 30px;
   font-weight: 700;
@@ -298,8 +306,8 @@ body {
 }
 
 .session-inline {
-  margin-left: 2px;
-  align-self: center;
+  margin-left: 0;
+  align-self: flex-start;
 }
 
 .tf-pill {
