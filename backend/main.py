@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from email.utils import parsedate_to_datetime
 import json
 import os
 from threading import Event, Lock, Thread
 from typing import Dict, List, Optional
 import time
-from urllib import request as urllib_request
-import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
@@ -40,31 +37,14 @@ _ALLOWED_ORIGINS = [
 ]
 _AUTH_ENABLED = _env_bool("FV_AUTH_ENABLED", False)
 _AUTH_TOKEN = os.getenv("FV_API_TOKEN", "").strip()
-_PUBLIC_API_PATHS = (
-    "/api/health",
-    "/api/data",
-    "/api/data_delta",
-    "/api/stream/data",
-    "/api/chart/data",
-    "/api/chart/data_delta",
-    "/api/chart/stream/data",
-    "/api/symbols",
-    "/api/quotes",
-    "/api/stream/quotes",
-    "/api/prewarm",
-    "/api/news",
-)
 _RATE_LIMIT_ENABLED = _env_bool("FV_RATE_LIMIT_ENABLED", True)
 _RATE_LIMIT_RPM = max(0, int(os.getenv("FV_RATE_LIMIT_RPM", "120")))
-_FRESH_DATA_RATE_MULTIPLIER = max(1, int(os.getenv("FV_FRESH_DATA_RATE_MULTIPLIER", "6")))
-
 _CHART_RATE_LIMIT_ENABLED = _env_bool("FV_CHART_RATE_LIMIT_ENABLED", _RATE_LIMIT_ENABLED)
-_CHART_RATE_LIMIT_RPM = max(0, int(os.getenv("FV_CHART_RATE_LIMIT_RPM", "2400")))
+_CHART_RATE_LIMIT_RPM = max(0, int(os.getenv("FV_CHART_RATE_LIMIT_RPM", "600")))
 _CHART_FRESH_DATA_RATE_MULTIPLIER = max(
     1,
-    int(os.getenv("FV_CHART_FRESH_DATA_RATE_MULTIPLIER", "24")),
+    int(os.getenv("FV_CHART_FRESH_DATA_RATE_MULTIPLIER", "12")),
 )
-
 _CHART_RATE_LIMIT_PATHS = (
     "/api/data",
     "/api/data_delta",
@@ -72,6 +52,19 @@ _CHART_RATE_LIMIT_PATHS = (
     "/api/chart/data",
     "/api/chart/data_delta",
     "/api/chart/stream/data",
+)
+_CHART_PUBLIC_DATA_PATHS = (
+    "/api/data",
+    "/api/data_delta",
+    "/api/chart/data",
+    "/api/chart/data_delta",
+    "/api/stream/data",
+    "/api/chart/stream/data",
+    "/api/symbols",
+    "/api/quotes",
+    "/api/stream/quotes",
+    "/api/news",
+    "/api/prewarm",
 )
 _RATE_LIMIT_LOCK = Lock()
 _RATE_LIMIT_STATE: Dict[str, Dict[str, int]] = {}
@@ -108,8 +101,7 @@ _REFRESH_LOCK = Lock()
 _STOP_EVENT = Event()
 _DATA_REFRESH_INFLIGHT: set[str] = set()
 _QUOTE_REFRESH_INFLIGHT: set[str] = set()
-_DATA_BUILD_LOCK = Lock()
-_DATA_BUILD_INFLIGHT: Dict[str, Event] = {}
+_DATA_FETCH_FAILURE_TS: Dict[str, float] = {}
 _HOT_DATA: Dict[str, Dict[str, object]] = {}
 _HOT_QUOTES_RTH: Dict[str, float] = {}
 _HOT_QUOTES_EXT: Dict[str, float] = {}
@@ -153,29 +145,29 @@ _DATA_STREAM_TICK_BY_TF = {
 
 _YF_TIMEOUT_SECONDS = 8
 _YF_RETRIES = 3
-
+_YF_FETCH_COOLDOWN_SECONDS = max(1, int(os.getenv("YF_FETCH_COOLDOWN_SECONDS", "60")))
 _OHLC_FIELDS = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
 
 
 def _extract_auth_token(request: Request) -> str:
     auth_header = request.headers.get("authorization", "").strip()
-    if auth_header.lower().startswith("bearer "):
+    if auth_header.lower().startswith("bearer " ):
         return auth_header[7:].strip()
-    query_token = request.query_params.get("token", "").strip()
-    if query_token:
-        return query_token
+
     cookie_token = (request.cookies.get("fv_auth_token") or "").strip()
     if cookie_token:
         return cookie_token
+
     return request.headers.get("x-api-key", "").strip()
 
 
-def _is_public_api_path(path: str) -> bool:
-    normalized = path.rstrip("/")
-    return any(
-        normalized == public or normalized.startswith(f"{public}/")
-        for public in _PUBLIC_API_PATHS
-    )
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "").strip()
+    if fwd:
+        return fwd.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
 
 
 def _is_chart_api_path(path: str) -> bool:
@@ -183,6 +175,14 @@ def _is_chart_api_path(path: str) -> bool:
     return any(
         normalized == chart_path or normalized.startswith(f"{chart_path}/")
         for chart_path in _CHART_RATE_LIMIT_PATHS
+    )
+
+
+def _is_public_chart_data_path(path: str) -> bool:
+    normalized = path.rstrip("/")
+    return any(
+        normalized == chart_path or normalized.startswith(f"{chart_path}/")
+        for chart_path in _CHART_PUBLIC_DATA_PATHS
     )
 
 
@@ -194,7 +194,7 @@ def _rate_limit_for_path(path: str, method: str, query=None) -> tuple[bool, int]
     else:
         enabled = _RATE_LIMIT_ENABLED
         rpm = _RATE_LIMIT_RPM
-        fresh_multiplier = _FRESH_DATA_RATE_MULTIPLIER
+        fresh_multiplier = 1
 
     if not enabled or rpm <= 0:
         return False, -1
@@ -204,15 +204,6 @@ def _rate_limit_for_path(path: str, method: str, query=None) -> tuple[bool, int]
         if _is_fresh_cached_data_request(path, query, method):
             effective_limit = rpm * fresh_multiplier
     return True, effective_limit
-
-
-def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "").strip()
-    if fwd:
-        return fwd.split(",")[0].strip()
-    if request.client and request.client.host:
-        return request.client.host
-    return "unknown"
 
 
 def _check_rate_limit(
@@ -226,9 +217,9 @@ def _check_rate_limit(
         return True, -1, effective_limit
 
     window = int(time.time() // 60)
-    is_chart = _is_chart_api_path(path)
-    rate_key = f"{ip}:fresh" if is_chart or effective_limit != _RATE_LIMIT_RPM else ip
     with _RATE_LIMIT_LOCK:
+        is_chart = _is_chart_api_path(path)
+        rate_key = f"{ip}:fresh" if is_chart or effective_limit != _RATE_LIMIT_RPM else ip
         entry = _RATE_LIMIT_STATE.get(rate_key)
         if not entry or entry.get("window", -1) != window:
             entry = {"window": window, "count": 0}
@@ -245,46 +236,380 @@ def _check_rate_limit(
                 if _RATE_LIMIT_STATE[key].get("window") not in stale_windows:
                     _RATE_LIMIT_STATE.pop(key, None)
         return True, remaining, effective_limit
+    window = int(time.time() // 60)
+    with _RATE_LIMIT_LOCK:
+        entry = _RATE_LIMIT_STATE.get(ip)
+        if not entry or entry.get("window", -1) != window:
+            entry = {"window": window, "count": 0}
+            _RATE_LIMIT_STATE[ip] = entry
+        count = int(entry.get("count", 0))
+        if count >= _RATE_LIMIT_RPM:
+            return False, 0
+        count += 1
+        entry["count"] = count
+        remaining = max(0, _RATE_LIMIT_RPM - count)
+        if len(_RATE_LIMIT_STATE) > 8000:
+            stale_windows = {window - 2, window - 1}
+            for key in list(_RATE_LIMIT_STATE.keys()):
+                if _RATE_LIMIT_STATE[key].get("window") not in stale_windows:
+                    _RATE_LIMIT_STATE.pop(key, None)
+        return True, remaining
 
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     path = request.url.path
+    is_public_chart_path = _is_public_chart_data_path(path)
+
+    # Public health check
+    if path == "/api/health":
+        return await call_next(request)
+
     if path.startswith("/api"):
-        # Always allow CORS preflight to pass quickly.
-        if request.method.upper() == "OPTIONS":
+        # Allow login without auth so users can obtain a token.
+        if path == "/api/auth/login":
             return await call_next(request)
 
-        if not _is_public_api_path(path):
-            if _AUTH_ENABLED:
-                if not _AUTH_TOKEN:
-                    return JSONResponse(
-                        status_code=503,
-                        content={"detail": "Auth enabled but FV_API_TOKEN is not configured"},
-                    )
-                token = _extract_auth_token(request)
-                if token != _AUTH_TOKEN:
-                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        # Primary gate: require valid WHOMP login for all /api/* endpoints.
+        if _AUTH_ENABLED and not is_public_chart_path:
+            if not _AUTH_TOKEN:
+                return JSONResponse(status_code=503, content={"detail": "Auth enabled but FV_API_TOKEN is not configured"})
+            token = _extract_auth_token(request)
+            if token != _AUTH_TOKEN:
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        if _WHOMP_LOGIN_REQUIRED and not is_public_chart_path:
+            token = _extract_auth_token(request)
+            auth_header = request.headers.get("authorization", "").strip()
+            if not auth_header.lower().startswith("bearer " ):
+                auth_header = f"Bearer {token}" if token else ""
+            ok, detail = _validate_whomp_token(token, auth_header)
+            if not ok:
+                status_code = 503 if detail == "Auth upstream unavailable" else 401
+                return JSONResponse(status_code=status_code, content={"detail": detail or "Unauthorized"})
+
         ip = _client_ip(request)
         allowed, remaining, effective_limit = _check_rate_limit(
             ip,
-            path=request.url.path,
+            path=path,
             method=request.method,
             query=request.query_params,
         )
         if not allowed:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded"},
-                headers={"Retry-After": "60"},
-            )
+            return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"}, headers={"Retry-After": "60"})
+
         response = await call_next(request)
         if effective_limit > 0:
             response.headers["X-RateLimit-Limit"] = str(effective_limit)
-            if remaining >= 0:
-                response.headers["X-RateLimit-Remaining"] = str(remaining)
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
         return response
+
     return await call_next(request)
+
+
+
+# ---- WHOMP proxy endpoints (auth + per-user watchlist) ---- (auth + per-user watchlist) ----
+# The charts frontend runs on a separate subdomain, so it cannot reuse localStorage from whomp.ai.
+# We proxy login + watchlist calls to the main WHOMP API on localhost and keep charts same-origin.
+
+_WHOMP_API_BASE = os.getenv("WHOMP_API_BASE", "http://127.0.0.1:8000").strip()
+
+_WHOMP_LOGIN_REQUIRED = _env_bool("WHOMP_LOGIN_REQUIRED", True)
+_WHOMP_AUTH_CACHE_TTL = max(1, int(os.getenv("WHOMP_AUTH_CACHE_TTL", "60")))
+_WHOMP_AUTH_CACHE: Dict[str, Dict[str, object]] = {}
+
+
+def _validate_whomp_token(token: str, auth_header: str) -> tuple[bool, Optional[str]]:
+    # Validate a WHOMP Bearer token by pinging the main API.
+    # Returns (ok, error_detail). Uses a small in-memory TTL cache.
+    if not token:
+        return False, "Unauthorized"
+
+    entry = _WHOMP_AUTH_CACHE.get(token)
+    now = time.time()
+    if entry and (now - float(entry.get("ts", 0))) < _WHOMP_AUTH_CACHE_TTL:
+        return bool(entry.get("ok")), entry.get("detail")
+
+    try:
+        resp = requests.get(_whomp_url("/auth/ping"), headers={"authorization": auth_header}, timeout=8)
+    except requests.RequestException:
+        _WHOMP_AUTH_CACHE[token] = {"ts": now, "ok": False, "detail": "Auth upstream unavailable"}
+        return False, "Auth upstream unavailable"
+
+    if resp.status_code != 200:
+        _WHOMP_AUTH_CACHE[token] = {"ts": now, "ok": False, "detail": "Unauthorized"}
+        return False, "Unauthorized"
+
+    _WHOMP_AUTH_CACHE[token] = {"ts": now, "ok": True, "detail": None}
+    return True, None
+
+
+def _whomp_url(path: str) -> str:
+    base = _WHOMP_API_BASE.rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
+def _forward_auth_headers(request: Request) -> Dict[str, str]:
+    """Forward auth to the main WHOMP API.
+
+    The charts app primarily authenticates via the fv_auth_token cookie (HttpOnly).
+    Some clients may still send an Authorization header; we preserve it when present.
+    """
+    auth = request.headers.get("authorization", "").strip()
+    headers: Dict[str, str] = {}
+    if auth:
+        headers["authorization"] = auth
+        return headers
+
+    token = _extract_auth_token(request)
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _json_or_text_response(resp: requests.Response) -> JSONResponse:
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {"detail": (resp.text or "").strip() or "Upstream returned non-JSON"}
+    return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+@app.post("/api/auth/login")
+async def charts_login(request: Request):
+    body = await request.json()
+    try:
+        resp = requests.post(_whomp_url("/auth/login"), json=body, timeout=12)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Auth upstream unavailable") from exc
+
+    out = _json_or_text_response(resp)
+    if resp.status_code == 200:
+        try:
+            payload = resp.json() if resp.content else {}
+        except Exception:
+            payload = {}
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if isinstance(token, str) and token.strip():
+            # Share across whomp.ai + charts.whomp.ai.
+            out.set_cookie(
+                key="fv_auth_token",
+                value=token.strip(),
+                path="/",
+                domain=".whomp.ai",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            )
+    return out
+
+
+@app.post("/api/auth/logout")
+async def charts_logout(request: Request):
+    try:
+        resp = requests.post(
+            _whomp_url("/auth/logout"),
+            headers=_forward_auth_headers(request),
+            timeout=12,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Logout upstream unavailable") from exc
+
+    out = _json_or_text_response(resp)
+    # Best-effort clear the shared cookie even if upstream logout fails.
+    out.delete_cookie(key="fv_auth_token", path="/", domain=".whomp.ai")
+    out.delete_cookie(key="fv_auth_token", path="/")
+    return out
+
+
+@app.get("/api/watchlist")
+async def charts_get_watchlist(request: Request):
+    try:
+        resp = requests.get(
+            _whomp_url("/charts/watchlist"),
+            headers=_forward_auth_headers(request),
+            timeout=12,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Watchlist upstream unavailable") from exc
+    return _json_or_text_response(resp)
+
+
+@app.put("/api/watchlist")
+async def charts_put_watchlist(request: Request):
+    body = await request.json()
+    try:
+        resp = requests.put(
+            _whomp_url("/charts/watchlist"),
+            json=body,
+            headers=_forward_auth_headers(request),
+            timeout=12,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Watchlist upstream unavailable") from exc
+    return _json_or_text_response(resp)
+
+
+@app.get("/api/news")
+async def charts_get_news(
+    request: Request,
+    symbol: str = Query(..., min_length=1, max_length=12),
+    limit: int = Query(3, ge=1, le=10),
+):
+    # Proxy ticker-specific news from the main WHOMP API (same feed as The Wire).
+    # Kept on the charts backend so the browser stays same-origin and we can
+    # forward Bearer auth upstream.
+    sym = symbol.strip().upper()
+    sym_norm = "".join(ch for ch in sym if ch.isalnum())
+
+    # Handle common ticker variants (e.g. BRK.B vs BRK-B vs BRKB).
+    sym_aliases = {sym}
+    if "." in sym:
+        sym_aliases.add(sym.replace(".", "-"))
+        sym_aliases.add(sym.replace(".", ""))
+    if "-" in sym:
+        sym_aliases.add(sym.replace("-", "."))
+        sym_aliases.add(sym.replace("-", ""))
+
+    def matches_symbol(ticker_value: str, headline_value: str) -> bool:
+        ticker = ticker_value.strip().upper()
+        if ticker in sym_aliases:
+            return True
+        ticker_norm = "".join(ch for ch in ticker if ch.isalnum())
+        if sym_norm and ticker_norm == sym_norm:
+            return True
+
+        # Fallback: headline mention check with simple boundary-style guards.
+        headline_upper = (headline_value or "").upper()
+        if not headline_upper:
+            return False
+        padded = f" {headline_upper} "
+        for alias in sym_aliases:
+            if alias and (
+                f" {alias} " in padded
+                or f"({alias})" in headline_upper
+                or f"${alias}" in headline_upper
+            ):
+                return True
+        return False
+
+    try:
+        resp = requests.get(
+            _whomp_url("/lite/news"),
+            headers=_forward_auth_headers(request),
+            timeout=12,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="News upstream unavailable") from exc
+
+    payload: Dict[str, object] = {
+        "items": [],
+        "last_updated": datetime.utcnow().isoformat(),
+    }
+    if resp.status_code == 200:
+        try:
+            payload = resp.json() if resp.content else payload
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail="News upstream returned invalid JSON") from exc
+    elif resp.status_code not in (401, 403):
+        return _json_or_text_response(resp)
+
+    items = payload.get("items") or []
+    filtered = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker") or "").strip().upper()
+        headline = str(item.get("headline") or "").strip()
+        if not matches_symbol(ticker, headline):
+            continue
+        filtered.append(
+            {
+                "ticker": ticker or sym,
+                "title": headline,
+                "source": str(item.get("source") or "").strip(),
+                "time": item.get("published_at"),
+                "url": item.get("url"),
+                "summary": item.get("summary"),
+                "sentiment": item.get("sentiment"),
+            }
+        )
+        if len(filtered) >= limit:
+            break
+
+    # Fallback: if the shared Wire feed has no direct matches for this symbol,
+    # pull a small ticker-specific set from Google News RSS so the panel does
+    # not appear broken for valid watchlist symbols.
+    if len(filtered) < limit:
+        try:
+            from email.utils import parsedate_to_datetime
+            from urllib import request as urllib_request
+            import xml.etree.ElementTree as ET
+
+            rss_url = (
+                "https://news.google.com/rss/search"
+                f"?q={sym}+stock&hl=en-US&gl=US&ceid=US:en"
+            )
+            req = urllib_request.Request(
+                rss_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; WhompCharts/1.0)"},
+            )
+            with urllib_request.urlopen(req, timeout=8) as resp:
+                rss_data = resp.read().decode("utf-8", errors="ignore")
+            root = ET.fromstring(rss_data)
+            for node in root.findall(".//item")[:limit]:
+                headline = (node.findtext("title", "") or "").strip()
+                if " - " in headline:
+                    headline = headline.rsplit(" - ", 1)[0].strip()
+                if not headline:
+                    continue
+                link = (node.findtext("link", "") or "").strip()
+                pub_date = (node.findtext("pubDate", "") or "").strip()
+                source_elem = node.find("source")
+                source_name = (
+                    source_elem.text.strip()
+                    if source_elem is not None and source_elem.text
+                    else "Google News"
+                )
+                try:
+                    pub_dt = parsedate_to_datetime(pub_date)
+                    published_at = pub_dt.isoformat()
+                except Exception:
+                    published_at = datetime.utcnow().isoformat()
+                filtered.append(
+                    {
+                        "ticker": sym,
+                        "title": headline,
+                        "source": source_name,
+                        "time": published_at,
+                        "url": link,
+                        "summary": None,
+                        "sentiment": "neutral",
+                    }
+                )
+                if len(filtered) >= limit:
+                    break
+        except Exception:
+            # Keep API response stable even if RSS fetch fails.
+            pass
+
+    return {
+        "symbol": sym,
+        "last_updated": payload.get("last_updated"),
+        "items": filtered,
+    }
+
+
+def _cache_get(cache: Dict[str, Dict[str, object]], key: str, ttl: int):
+    entry = cache.get(key)
+    if not entry:
+        return None
+    if time.time() - entry["ts"] > ttl:
+        cache.pop(key, None)
+        return None
+    return entry["value"]
 
 
 def _is_fresh_cached_data_request(path: str, query: Dict[str, str], method: str) -> bool:
@@ -316,16 +641,6 @@ def _is_fresh_cached_data_request(path: str, query: Dict[str, str], method: str)
     return entry is not None and not _cache_is_stale(entry, ttl)
 
 
-def _cache_get(cache: Dict[str, Dict[str, object]], key: str, ttl: int):
-    entry = cache.get(key)
-    if not entry:
-        return None
-    if time.time() - entry["ts"] > ttl:
-        cache.pop(key, None)
-        return None
-    return entry["value"]
-
-
 def _cache_peek(cache: Dict[str, Dict[str, object]], key: str):
     return cache.get(key)
 
@@ -336,6 +651,21 @@ def _cache_is_stale(entry: Dict[str, object], ttl: int) -> bool:
 
 def _cache_set(cache: Dict[str, Dict[str, object]], key: str, value: object):
     cache[key] = {"ts": time.time(), "value": value}
+
+
+def _is_data_fetch_backoff(cache_key: str) -> bool:
+    fail_ts = _DATA_FETCH_FAILURE_TS.get(cache_key)
+    if fail_ts is None:
+        return False
+    return (time.time() - float(fail_ts)) < _YF_FETCH_COOLDOWN_SECONDS
+
+
+def _mark_data_fetch_failure(cache_key: str) -> None:
+    _DATA_FETCH_FAILURE_TS[cache_key] = time.time()
+
+
+def _clear_data_fetch_failure(cache_key: str) -> None:
+    _DATA_FETCH_FAILURE_TS.pop(cache_key, None)
 
 
 def _yf_download_with_retry(
@@ -369,6 +699,29 @@ def _yf_download_with_retry(
     if last_error:
         raise last_error
     return pd.DataFrame()
+
+
+def _download_with_fallback(
+    symbol: str,
+    *,
+    period: str,
+    interval: str,
+    include_prepost: bool,
+) -> pd.DataFrame:
+    df = _yf_download_with_retry(
+        symbol,
+        period=period,
+        interval=interval,
+        prepost=include_prepost,
+    )
+    if not df.empty or not include_prepost:
+        return df
+    return _yf_download_with_retry(
+        symbol,
+        period=period,
+        interval=interval,
+        prepost=False,
+    )
 
 
 def _requests_json_with_retry(url: str, *, params: Dict[str, object], retries: int = 2, timeout: int = 8):
@@ -685,16 +1038,19 @@ def _get_quote_snapshot(symbols: List[str], include_prepost: bool = False) -> Di
                     prev_close_value = None
             else:
                 prev_close_value = None
-            if prev_close_value:
-                change = display_price - prev_close_value
-                pct = (change / prev_close_value * 100) if prev_close_value else 0.0
-                rth_change = rth_price - prev_close_value
-                rth_change_pct = (rth_change / prev_close_value * 100) if prev_close_value else 0.0
-            elif prev is not None:
-                change = display_price - prev
-                pct = (change / prev * 100) if prev else 0.0
-                rth_change = rth_price - prev
-                rth_change_pct = (rth_change / prev * 100) if prev else 0.0
+
+            change_base = None
+            if prev_close_value is not None:
+                if abs(display_price - prev_close_value) > 1e-9:
+                    change_base = prev_close_value
+            if change_base is None and prev is not None:
+                change_base = prev
+
+            if change_base is not None:
+                change = display_price - change_base
+                pct = (change / change_base * 100) if change_base else 0.0
+                rth_change = rth_price - change_base
+                rth_change_pct = (rth_change / change_base * 100) if change_base else 0.0
             else:
                 change = 0.0
                 pct = 0.0
@@ -734,52 +1090,41 @@ def _get_cached_symbol_payload(symbol: str, tf: str, ext: bool) -> Dict[str, obj
     ttl = _get_data_ttl(tf)
     cache_key = f"{symbol}:{tf}:{1 if ext else 0}"
     _mark_hot_data(symbol, tf, ext)
-    while True:
-        entry = _cache_peek(_DATA_CACHE, cache_key)
-        if entry and not _cache_is_stale(entry, ttl):
+    entry = _cache_peek(_DATA_CACHE, cache_key)
+    if entry and not _cache_is_stale(entry, ttl):
+        return entry["value"]
+    if _is_data_fetch_backoff(cache_key) and entry is not None:
+        return entry["value"]
+
+    with _REFRESH_LOCK:
+        if cache_key in _DATA_REFRESH_INFLIGHT:
+            if entry is not None:
+                return entry["value"]
+            raise HTTPException(status_code=503, detail="Data refresh in progress")
+        _DATA_REFRESH_INFLIGHT.add(cache_key)
+
+    try:
+        payload = _build_symbol_payload(symbol, tf, ext)
+        _cache_set(_DATA_CACHE, cache_key, payload)
+        _clear_data_fetch_failure(cache_key)
+        return payload
+    except HTTPException:
+        if entry is not None:
             return entry["value"]
-
-        stale_entry = entry if entry and _cache_is_stale(entry, ttl) else None
-
-        wait_event: Optional[Event] = None
-        should_build = False
-
-        with _DATA_BUILD_LOCK:
-            existing = _DATA_BUILD_INFLIGHT.get(cache_key)
-            if existing is None:
-                wait_event = Event()
-                _DATA_BUILD_INFLIGHT[cache_key] = wait_event
-                should_build = True
-            else:
-                wait_event = existing
-
-        if should_build:
-            try:
-                payload = _build_symbol_payload(symbol, tf, ext)
-                _cache_set(_DATA_CACHE, cache_key, payload)
-                return payload
-            except Exception:
-                if stale_entry is not None and stale_entry.get("value") is not None:
-                    return stale_entry["value"]
-                raise
-            finally:
-                with _DATA_BUILD_LOCK:
-                    _DATA_BUILD_INFLIGHT.pop(cache_key, None)
-                if wait_event is not None:
-                    wait_event.set()
-        else:
-            if wait_event is not None:
-                wait_event.wait(timeout=12)
-            # Re-check cache after the in-flight request has finished (or timed out).
-            # If the builder failed and there is a stale snapshot, continue using it.
-            entry = _cache_peek(_DATA_CACHE, cache_key)
-            if entry and not _cache_is_stale(entry, ttl):
-                return entry["value"]
-            if entry is not None and stale_entry is not None and entry.get("value") is not None:
-                # Keep serving stale data during temporary upstream flakiness.
-                return entry["value"]
-            if stale_entry is not None and stale_entry.get("value") is not None:
-                return stale_entry["value"]
+        raise
+    except Exception:
+        _mark_data_fetch_failure(cache_key)
+        if entry is not None:
+            return entry["value"]
+        if _is_data_fetch_backoff(cache_key):
+            raise HTTPException(
+                status_code=503,
+                detail="Data temporarily unavailable, retry in a moment",
+            )
+        raise
+    finally:
+        with _REFRESH_LOCK:
+            _DATA_REFRESH_INFLIGHT.discard(cache_key)
 
 
 def _filter_series_since(
@@ -874,21 +1219,23 @@ def _build_symbol_payload(symbol: str, tf: str, ext: bool) -> Dict[str, object]:
     include_prepost = ext and tf not in ("1d", "1w")
     is_24_7 = _is_24_7(symbol)
     period, interval = _INTERVALS.get(tf, ("5d", "5m"))
-    df = _yf_download_with_retry(
+    df = _download_with_fallback(
         symbol,
         period=period,
         interval=interval,
-        prepost=include_prepost,
+        include_prepost=include_prepost,
     )
     min_bars = _MIN_BARS.get(tf)
     fallback_period = _FALLBACK_PERIODS.get(tf)
     if min_bars and fallback_period and len(df) < min_bars and fallback_period != period:
-        df = _yf_download_with_retry(
+        fallback_df = _download_with_fallback(
             symbol,
             period=fallback_period,
             interval=interval,
-            prepost=include_prepost,
+            include_prepost=include_prepost,
         )
+        if not fallback_df.empty:
+            df = fallback_df
     if df.empty:
         raise HTTPException(status_code=404, detail="No data")
     df = _extract_symbol_df(df, symbol)
@@ -947,72 +1294,6 @@ def _build_symbol_payload(symbol: str, tf: str, ext: bool) -> Dict[str, object]:
     }
 
 
-def _get_chart_data_payload(symbol: str, tf: str, ext: bool) -> Dict[str, object]:
-    symbol = _normalize_symbol(symbol)
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Invalid symbol")
-    tf = tf.lower()
-    return _get_cached_symbol_payload(symbol, tf, ext)
-
-
-def _get_chart_data_delta_payload(
-    symbol: str, tf: str, ext: bool, since: int
-) -> Dict[str, object]:
-    payload = _get_chart_data_payload(symbol, tf, ext)
-    since_ts = max(0, int(since))
-    return _build_delta_from_payload(payload, since_ts)
-
-
-def _stream_chart_data_response(
-    symbol: str, tf: str, ext: bool, since: int
-) -> StreamingResponse:
-    symbol = _normalize_symbol(symbol)
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Invalid symbol")
-    tf = tf.lower()
-    since_ts = max(0, int(since))
-    _mark_hot_data(symbol, tf, ext)
-    tick = _get_stream_tick(tf)
-
-    def event_stream():
-        nonlocal since_ts
-        last_sig = ""
-        stream_error = False
-        while not _STOP_EVENT.is_set():
-            try:
-                payload = _get_cached_symbol_payload(symbol, tf, ext)
-                delta = _build_delta_from_payload(payload, since_ts)
-                has_updates = (
-                    len(delta.get("candles", []))
-                    or len(delta.get("ext_candles", []))
-                    or len(delta.get("volume", []))
-                    or any(len(v) for v in (delta.get("indicators", {}) or {}).values())
-                )
-                stream_error = False
-                if has_updates:
-                    sig = _delta_signature(delta)
-                    if sig != last_sig:
-                        last_sig = sig
-                        latest_time = int(delta.get("latest_time", 0))
-                        if latest_time > 0:
-                            since_ts = max(since_ts, latest_time)
-                        yield f"data: {json.dumps(delta)}\n\n"
-            except Exception:
-                if not stream_error:
-                    error_payload = {
-                        "type": "stream_error",
-                        "message": "temporary data error",
-                        "symbol": symbol,
-                        "timeframe": tf,
-                        "ext": ext,
-                    }
-                    yield f"data: {json.dumps(error_payload)}\n\n"
-                    stream_error = True
-            _STOP_EVENT.wait(tick)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
 def _refresh_hot_data():
     now = time.time()
     with _REFRESH_LOCK:
@@ -1037,7 +1318,9 @@ def _refresh_hot_data():
                 bool(meta.get("ext", False)),
             )
             _cache_set(_DATA_CACHE, key, payload)
+            _clear_data_fetch_failure(key)
         except Exception:
+            _mark_data_fetch_failure(key)
             pass
         finally:
             with _REFRESH_LOCK:
@@ -1107,8 +1390,12 @@ def _get_symbol_meta(symbol: str) -> Dict[str, object]:
     name = ""
     currency = ""
     prev_close = None
+    info: Optional[Dict[str, object]]
     try:
-        info = yf.Ticker(symbol).info
+        def _meta():
+            return yf.Ticker(symbol).info
+
+        info = _meta()
         exchange = info.get("exchange") or info.get("fullExchangeName") or ""
         quote_type = info.get("quoteType") or ""
         name = info.get("shortName") or info.get("longName") or info.get("displayName") or ""
@@ -1159,7 +1446,11 @@ def get_symbol_data(
     tf: str = Query("5m", description="Timeframe, e.g. 1m,5m,15m,1h,4h,1d,1w"),
     ext: bool = Query(False, description="Include extended hours"),
 ):
-    return _get_chart_data_payload(symbol, tf, ext)
+    symbol = _normalize_symbol(symbol)
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    tf = tf.lower()
+    return _get_cached_symbol_payload(symbol, tf, ext)
 
 
 @app.get("/api/chart/data/{symbol}")
@@ -1168,7 +1459,7 @@ def get_chart_symbol_data(
     tf: str = Query("5m", description="Timeframe, e.g. 1m,5m,15m,1h,4h,1d,1w"),
     ext: bool = Query(False, description="Include extended hours"),
 ):
-    return _get_chart_data_payload(symbol, tf, ext)
+    return get_symbol_data(symbol=symbol, tf=tf, ext=ext)
 
 
 @app.get("/api/data_delta/{symbol}")
@@ -1178,7 +1469,13 @@ def get_symbol_data_delta(
     ext: bool = Query(False, description="Include extended hours"),
     since: int = Query(0, description="Unix timestamp of last known bar"),
 ):
-    return _get_chart_data_delta_payload(symbol, tf, ext, since)
+    symbol = _normalize_symbol(symbol)
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    tf = tf.lower()
+    payload = _get_cached_symbol_payload(symbol, tf, ext)
+    since_ts = max(0, int(since))
+    return _build_delta_from_payload(payload, since_ts)
 
 
 @app.get("/api/chart/data_delta/{symbol}")
@@ -1188,7 +1485,7 @@ def get_chart_symbol_data_delta(
     ext: bool = Query(False, description="Include extended hours"),
     since: int = Query(0, description="Unix timestamp of last known bar"),
 ):
-    return _get_chart_data_delta_payload(symbol, tf, ext, since)
+    return get_symbol_data_delta(symbol=symbol, tf=tf, ext=ext, since=since)
 
 
 @app.get("/api/stream/data/{symbol}")
@@ -1198,7 +1495,58 @@ def stream_symbol_data(
     ext: bool = Query(False, description="Include extended hours"),
     since: int = Query(0, description="Unix timestamp of last known bar"),
 ):
-    return _stream_chart_data_response(symbol, tf, ext, since)
+    symbol = _normalize_symbol(symbol)
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Invalid symbol")
+    tf = tf.lower()
+    since_ts = max(0, int(since))
+    _mark_hot_data(symbol, tf, ext)
+    tick = _get_stream_tick(tf)
+
+    def event_stream():
+        nonlocal since_ts
+        last_sig = ""
+        last_error = ""
+        last_keepalive = 0.0
+        while not _STOP_EVENT.is_set():
+            try:
+                payload = _get_cached_symbol_payload(symbol, tf, ext)
+                delta = _build_delta_from_payload(payload, since_ts)
+            except Exception as exc:
+                error_msg = str(exc)
+                if error_msg != last_error:
+                    last_error = error_msg
+                    payload = {
+                        "symbol": symbol,
+                        "timeframe": tf,
+                        "ext": ext,
+                        "error": error_msg,
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                _STOP_EVENT.wait(_get_stream_tick(tf))
+                continue
+            last_error = ""
+            has_updates = (
+                len(delta.get("candles", []))
+                or len(delta.get("ext_candles", []))
+                or len(delta.get("volume", []))
+                or any(len(v) for v in (delta.get("indicators", {}) or {}).values())
+            )
+            if has_updates:
+                sig = _delta_signature(delta)
+                if sig != last_sig:
+                    last_sig = sig
+                    latest_time = int(delta.get("latest_time", 0))
+                    if latest_time > 0:
+                        since_ts = max(since_ts, latest_time)
+                    yield f"data: {json.dumps(delta)}\n\n"
+            now = time.time()
+            if now - last_keepalive >= 30:
+                yield ": keep-alive\n\n"
+                last_keepalive = now
+            _STOP_EVENT.wait(tick)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/api/chart/stream/data/{symbol}")
@@ -1208,7 +1556,7 @@ def stream_chart_symbol_data(
     ext: bool = Query(False, description="Include extended hours"),
     since: int = Query(0, description="Unix timestamp of last known bar"),
 ):
-    return _stream_chart_data_response(symbol, tf, ext, since)
+    return stream_symbol_data(symbol=symbol, tf=tf, ext=ext, since=since)
 
 
 @app.get("/api/prewarm")
@@ -1239,76 +1587,6 @@ def prewarm_chart_data(
         "failed": failed,
         "tf": tf,
         "ext": ext,
-    }
-
-
-@app.get("/api/news")
-def get_news(
-    symbol: str = Query(..., min_length=1, max_length=20),
-    limit: int = Query(3, ge=1, le=10),
-):
-    """
-    Ticker-specific news from a public feed.
-
-    This endpoint intentionally avoids external service credentials so the charts
-    iframe can always render with ticker headlines.
-    """
-    sym = "".join(ch for ch in symbol.upper() if ch.isalnum() or ch in "-.")
-    if not sym:
-        return {
-            "symbol": symbol,
-            "items": [],
-            "last_updated": datetime.utcnow().isoformat(),
-        }
-
-    rss_url = (
-        "https://news.google.com/rss/search"
-        f"?q={sym}%20stock&hl=en-US&gl=US&ceid=US:en"
-    )
-    try:
-        request_obj = urllib_request.Request(
-            rss_url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; WhompCharts/1.0)"},
-        )
-        with urllib_request.urlopen(request_obj, timeout=8) as response:
-            xml_payload = response.read().decode("utf-8", errors="ignore")
-        root = ET.fromstring(xml_payload)
-    except Exception:
-        return {
-            "symbol": sym,
-            "items": [],
-            "last_updated": datetime.utcnow().isoformat(),
-        }
-
-    items = []
-    for node in root.findall(".//item")[:limit]:
-        title = (node.findtext("title", "") or "").strip()
-        if not title:
-            continue
-        if " - " in title:
-            title = title.rsplit(" - ", 1)[0].strip()
-        link = (node.findtext("link", "") or "").strip()
-        source_elem = node.find("source")
-        source = (source_elem.text or "").strip() if source_elem is not None else "Google News"
-        pub_date = (node.findtext("pubDate", "") or "").strip()
-        try:
-            published_at = parsedate_to_datetime(pub_date).isoformat()
-        except Exception:
-            published_at = datetime.utcnow().isoformat()
-        items.append(
-            {
-                "ticker": sym,
-                "title": title,
-                "source": source,
-                "time": published_at,
-                "url": link,
-            }
-        )
-
-    return {
-        "symbol": sym,
-        "items": items,
-        "last_updated": datetime.utcnow().isoformat(),
     }
 
 
@@ -1391,6 +1669,7 @@ def stream_quotes(
 
     def event_stream():
         last_payload: Optional[Dict[str, object]] = None
+        last_keepalive = 0.0
         while not _STOP_EVENT.is_set():
             mode_key = "ext" if ext else "rth"
             cache_key = f"{mode_key}:" + ",".join(sym_list)
@@ -1414,6 +1693,11 @@ def stream_quotes(
             if event_payload != last_payload:
                 last_payload = event_payload
                 yield f"data: {json.dumps(event_payload)}\n\n"
+            now = time.time()
+            if now - last_keepalive >= 30:
+                yield ": keep-alive\n\n"
+                last_keepalive = now
             _STOP_EVENT.wait(_QUOTE_TTL)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+

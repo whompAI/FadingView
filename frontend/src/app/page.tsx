@@ -41,25 +41,6 @@ type VolumePoint = {
   color?: string;
 };
 
-type CandleWire = Omit<Candle, "time"> & { time: number };
-type LinePointWire = { time: number; value: number };
-type VolumePointWire = { time: number; value: number; color?: string };
-
-type DataSnapshotResponse = {
-  candles?: CandleWire[];
-  ext_candles?: CandleWire[];
-  volume?: VolumePointWire[];
-  indicators?: {
-    sma20?: LinePointWire[];
-    sma50?: LinePointWire[];
-    sma200?: LinePointWire[];
-    ema12?: LinePointWire[];
-    ema26?: LinePointWire[];
-    rsi14?: LinePointWire[];
-    vwap?: LinePointWire[];
-  };
-};
-
 type SymbolResult = {
   symbol: string;
   name?: string;
@@ -83,25 +64,6 @@ type Quote = {
   extPrice?: number;
   extChange?: number;
   extChangePct?: number;
-};
-
-type NewsApiItem = {
-  title?: string;
-  source?: string;
-  published_at?: string;
-  url?: string;
-};
-
-type NewsApiResponse = {
-  data?: NewsApiItem[];
-};
-
-type EmbedConfig = {
-  embed: boolean;
-  chromeOff: boolean;
-  mode: string;
-  seed: string;
-  canvasOnly: boolean;
 };
 
 type DeltaPayload = {
@@ -216,11 +178,33 @@ const toUtcTimestampSafe = (
   return toUtcTimestamp(seconds ?? 0);
 };
 
+const mergeByTime = <T extends { time: UTCTimestamp }>(
+  prev: T[],
+  incoming: T[]
+): T[] => {
+  if (!incoming.length) return prev;
+  const map = new Map<number, T>();
+  prev.forEach((item) => map.set(item.time, item));
+  incoming.forEach((item) => map.set(item.time, item));
+  return Array.from(map.values()).sort((a, b) => a.time - b.time);
+};
+
 const DEFAULT_WATCHLIST = ["SPY", "QQQ", "AAPL", "NVDA", "MSFT"];
 const CORE_TIMEFRAMES = ["1h", "4h", "1d", "1w"];
 const ADVANCED_TIMEFRAMES = ["1m", "5m", "15m", "30m"];
 const DEFAULT_TIMEFRAME = "1h";
 const MAX_WATCHLIST = 50;
+const WATCHLIST_LAYOUT_DEFAULT = { items: 40, selected: 24, news: 36 };
+const WATCHLIST_LAYOUT_MIN_ITEMS = 18;
+const WATCHLIST_LAYOUT_MIN_SELECTED = 16;
+const WATCHLIST_LAYOUT_MIN_NEWS = 20;
+
+const clampPercent = (value: number, min: number, max: number): number => {
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+};
+const AUTH_TOKEN_KEY = "fv_auth_token";
 const TIMEFRAME_SECONDS: Record<string, number> = {
   "1m": 60,
   "5m": 300,
@@ -231,22 +215,14 @@ const TIMEFRAME_SECONDS: Record<string, number> = {
   "1d": 86400,
   "1w": 604800,
 };
-const MAX_BARS_BY_TF: Record<string, number> = {
-  "1m": 900,
-  "5m": 700,
-  "15m": 600,
-  "30m": 500,
-  "1h": 500,
-  "4h": 420,
-  "1d": 320,
-  "1w": 260,
-};
 
 export default function Home() {
-  const apiBase = useMemo(
-    () => process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000",
-    []
-  );
+  // In production we want same-origin calls via nginx ("/api/*").
+  // In local dev you can set NEXT_PUBLIC_API_BASE=http://127.0.0.1:8001.
+  const apiBase = useMemo(() => {
+    const envBase = process.env.NEXT_PUBLIC_API_BASE;
+    return envBase && envBase.trim().length ? envBase.trim() : "";
+  }, []);
   const chartRef = useRef<HTMLDivElement | null>(null);
   const chartApiRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -263,48 +239,10 @@ export default function Home() {
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const priceLineRef = useRef<IPriceLine | null>(null);
   const lastCandleRef = useRef<Candle | null>(null);
-  const rthTimesRef = useRef<Set<number>>(new Set());
-  const volumeDataRef = useRef<VolumePoint[]>([]);
-  const indicatorDataRef = useRef<{
-    sma20: LinePoint[];
-    sma50: LinePoint[];
-    sma200: LinePoint[];
-    ema12: LinePoint[];
-    ema26: LinePoint[];
-    rsi14: LinePoint[];
-    vwap: LinePoint[];
-  }>({
-    sma20: [],
-    sma50: [],
-    sma200: [],
-    ema12: [],
-    ema26: [],
-    rsi14: [],
-    vwap: [],
-  });
   const defaultViewRef = useRef<boolean>(true);
   const candlesRef = useRef<Candle[]>([]);
   const extCandlesRef = useRef<Candle[]>([]);
   const extEnabledRef = useRef<boolean>(false);
-  const togglesRef = useRef<{
-    showSma20: boolean;
-    showSma50: boolean;
-    showSma200: boolean;
-    showEma12: boolean;
-    showEma26: boolean;
-    showVwap: boolean;
-    showRsi: boolean;
-    showVolume: boolean;
-  }>({
-    showSma20: false,
-    showSma50: false,
-    showSma200: false,
-    showEma12: false,
-    showEma26: false,
-    showVwap: false,
-    showRsi: false,
-    showVolume: true,
-  });
   const resizeTimerRef = useRef<number | null>(null);
   const lastSizeRef = useRef<{ width: number; height: number }>({
     width: 0,
@@ -313,13 +251,70 @@ export default function Home() {
   const urlStateReadyRef = useRef<boolean>(false);
   const fullFetchSeqRef = useRef<number>(0);
   const lastLoadedDataKeyRef = useRef<string>("");
+  const [embedConfig] = useState(() => {
+    if (typeof window === "undefined") {
+      return { isEmbed: false, forcedSymbol: "" };
+    }
+    const params = new URLSearchParams(window.location.search);
+    const rawSymbol = (params.get("symbol") ?? "")
+      .toUpperCase()
+      .trim()
+      .replace(/[^A-Z0-9=.\-^/]/g, "");
+    const chromeOff = params.get("chrome") == "0";
+    const mode = (params.get("mode") ?? "").toLowerCase();
+    return {
+      isEmbed: params.get("embed") === "1",
+      forcedSymbol: rawSymbol,
+      chromeOff,
+      canvasOnly: chromeOff && mode == "canvas",
+    };
+  });
+  const isEmbedMode = embedConfig.isEmbed;
+  const forcedEmbedSymbol = embedConfig.forcedSymbol;
+  const initialUrlSymbol = forcedEmbedSymbol;
 
-  const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
-  const [selected, setSelected] = useState<string>(DEFAULT_WATCHLIST[0]);
+  const isCanvasOnly = isEmbedMode && !!(embedConfig as any).canvasOnly;
+
+  useEffect(() => {
+    if (!isEmbedMode) return;
+    document.documentElement.classList.add("whomp-embed");
+    if (isCanvasOnly) document.documentElement.classList.add("whomp-embed-canvas");
+    return () => {
+      document.documentElement.classList.remove("whomp-embed");
+      document.documentElement.classList.remove("whomp-embed-canvas");
+    };
+  }, [isEmbedMode, isCanvasOnly]);
+
+  const [watchlist, setWatchlist] = useState<string[]>(
+    () =>
+      isEmbedMode && forcedEmbedSymbol
+        ? [forcedEmbedSymbol]
+        : DEFAULT_WATCHLIST
+  );
+  const [authToken, setAuthToken] = useState<string>("");
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [sessionAuthorized, setSessionAuthorized] = useState<boolean>(false);
+  const [syncState, setSyncState] = useState<"local" | "syncing" | "synced" | "error">("local");
+  const [showLogin, setShowLogin] = useState<boolean>(false);
+  const [loginUsername, setLoginUsername] = useState<string>("");
+  const [loginPassword, setLoginPassword] = useState<string>("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const serverHydratedRef = useRef<boolean>(false);
+  const serverSaveTimerRef = useRef<number | null>(null);
+  const [selected, setSelected] = useState<string>(
+    () =>
+      isEmbedMode && forcedEmbedSymbol
+        ? forcedEmbedSymbol
+        : DEFAULT_WATCHLIST[0]
+  );
   const [timeframe, setTimeframe] = useState<string>(DEFAULT_TIMEFRAME);
   const [extEnabled, setExtEnabled] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [searchResults, setSearchResults] = useState<SymbolResult[]>([]);
+  const [watchlistLayout, setWatchlistLayout] = useState(WATCHLIST_LAYOUT_DEFAULT);
+  const watchlistLayoutRef = useRef(WATCHLIST_LAYOUT_DEFAULT);
+  const watchlistSectionRef = useRef<HTMLDivElement | null>(null);
+  const activeWatchlistHandleRef = useRef<"items" | "selected" | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [extCandles, setExtCandles] = useState<Candle[]>([]);
   const [indicatorData, setIndicatorData] = useState<{
@@ -339,22 +334,13 @@ export default function Home() {
     rsi14: [],
     vwap: [],
   });
+  const [volumeData, setVolumeData] = useState<VolumePoint[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [quotesStale, setQuotesStale] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<string>("offline");
   const [streamMode, setStreamMode] = useState<"stream" | "reconnecting" | "polling">("stream");
-  const [chartLastBarTs, setChartLastBarTs] = useState<number>(0);
-  const [indicatorLast, setIndicatorLast] = useState<{
-    sma20?: number;
-    sma50?: number;
-    sma200?: number;
-    ema12?: number;
-    ema26?: number;
-    vwap?: number;
-    rsi14?: number;
-  }>({});
   const [clockTs, setClockTs] = useState<number>(Date.now());
   const [chartMenu, setChartMenu] = useState<{
     open: boolean;
@@ -379,7 +365,7 @@ export default function Home() {
   const headerPrice = selectedQuote?.price;
   const headerChange = selectedQuote?.changePct;
   const headerName = selectedQuote?.name;
-  const headerExchange = selectedQuote?.exchange;
+  const headerExchange = formatExchangeLabel(selectedQuote?.exchange, selected);
   const headerSession = selectedQuote?.session;
   const detailRthPrice = selectedQuote?.rthPrice ?? selectedQuote?.price;
   const detailRthChange = selectedQuote?.rthChange ?? selectedQuote?.change;
@@ -394,32 +380,52 @@ export default function Home() {
   const extDetailLabel =
     selectedQuote?.session === "pre" ? "Pre" : "Post";
   const watchlistKey = useMemo(() => watchlist.join(","), [watchlist]);
-  const embedConfig = useMemo<EmbedConfig>(() => {
-    if (typeof window === "undefined") {
-      return { embed: false, chromeOff: false, mode: "", seed: "", canvasOnly: false };
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const embed = params.get("embed") === "1";
-    const chromeOff = params.get("chrome") === "0";
-    const mode = (params.get("mode") || "").toLowerCase();
-    const seed = params.get("seed") || "";
-    const canvasOnly = embed && (chromeOff || mode === "canvas" || mode === "");
-
-    return { embed, chromeOff, mode, seed, canvasOnly };
-  }, []);
+  const accessLocked = !isEmbedMode && authChecked && !sessionAuthorized;
 
   const normalizeSymbol = (value: string): string =>
     value.toUpperCase().trim().replace(/[^A-Z0-9=.\-^/]/g, "");
 
-  const embedSymbol = useMemo<string | null>(() => {
-    if (!embedConfig.embed || typeof window === "undefined") return null;
-    const params = new URLSearchParams(window.location.search);
-    const symbolParam = params.get("symbol");
-    const normalized = normalizeSymbol(symbolParam ?? "");
-    return normalized || null;
-  }, [embedConfig.embed]);
+  function formatExchangeLabel(exchange?: string, symbol?: string): string {
+    const code = (exchange || "").toUpperCase().trim();
+    const symbolText = (symbol || "").toUpperCase().trim();
 
+    if (!code && !symbolText) return "—";
+
+    if (symbolText === "NQ" || symbolText === "ES") return symbolText;
+    if (symbolText === "QQQ" || symbolText === "SPY") return symbolText;
+
+    const normalized = code.replace(/[^A-Z0-9]/g, "");
+    if (!normalized) return "—";
+
+    if (
+      normalized.includes("NMS") ||
+      normalized.includes("XNMS") ||
+      normalized.includes("XNCM") ||
+      normalized.includes("XNAS") ||
+      normalized.includes("NSDQ") ||
+      normalized.includes("NASD") ||
+      normalized.includes("NASDAQ")
+    ) {
+      return "NASDAQ";
+    }
+
+    const exchangeMap: Record<string, string> = {
+      BATS: "BATS",
+      ARCA: "ARCA",
+      XASE: "AMEX",
+      AMEX: "AMEX",
+      NYS: "NYSE",
+      NYQ: "NYSE",
+      XNYS: "NYSE",
+      CBOE: "CBOE",
+      CME: "CME",
+      NYMEX: "NYMEX",
+      COMEX: "COMEX",
+      ICE: "ICE",
+    };
+
+    return exchangeMap[normalized] || normalized;
+  };
   const isRthSession = () => {
     try {
       const parts = new Intl.DateTimeFormat("en-US", {
@@ -482,39 +488,20 @@ export default function Home() {
   }, [extEnabled]);
 
   useEffect(() => {
-    togglesRef.current = {
-      showSma20,
-      showSma50,
-      showSma200,
-      showEma12,
-      showEma26,
-      showVwap,
-      showRsi,
-      showVolume,
-    };
-  }, [
-    showSma20,
-    showSma50,
-    showSma200,
-    showEma12,
-    showEma26,
-    showVwap,
-    showRsi,
-    showVolume,
-  ]);
-
-  useEffect(() => {
-    const storedWatchlist = window.localStorage.getItem("fv_watchlist");
-    const storedSelected = window.localStorage.getItem("fv_selected");
-    if (embedConfig.embed && embedSymbol) {
-      setSelected(embedSymbol);
-      setWatchlist((prev) => {
-        if (prev.includes(embedSymbol)) return prev;
-        return [embedSymbol, ...prev].slice(0, MAX_WATCHLIST);
-      });
+    if (isEmbedMode) {
+      if (forcedEmbedSymbol) {
+        setWatchlist([forcedEmbedSymbol]);
+        setSelected(forcedEmbedSymbol);
+      }
       return;
     }
-
+    const storedToken = window.localStorage.getItem(AUTH_TOKEN_KEY);
+    if (storedToken && storedToken.trim().length) {
+      setAuthToken(storedToken.trim());
+      const token = storedToken.trim();
+    }
+    const storedWatchlist = window.localStorage.getItem("fv_watchlist");
+    const storedSelected = window.localStorage.getItem("fv_selected");
     if (storedWatchlist) {
       try {
         const parsed = JSON.parse(storedWatchlist);
@@ -536,7 +523,87 @@ export default function Home() {
         // Ignore invalid localStorage data.
       }
     }
-  }, []);
+  }, [isEmbedMode, forcedEmbedSymbol]);
+
+  useEffect(() => {
+    if (isEmbedMode) {
+      setSessionAuthorized(true);
+      setAuthChecked(true);
+      setSyncState("local");
+      setShowLogin(false);
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setSyncState("syncing");
+        const headers: Record<string, string> = {};
+        if (authToken) {
+          headers.authorization = `Bearer ${authToken}`;
+        }
+
+        const res = await fetch(`${apiBase}/api/watchlist`, {
+          headers,
+          cache: "no-store",
+        });
+
+        if (res.status === 401) {
+          // Either token expired or no shared cookie session exists.
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          if (!cancelled) {
+            setAuthToken("");
+            setSyncState("local");
+            setShowLogin(true);
+            setSessionAuthorized(false);
+            setAuthChecked(true);
+          }
+          // Best-effort: clear server-managed cookie session too.
+          try {
+            await fetch(`${apiBase}/api/auth/logout`, { method: "POST", cache: "no-store" });
+          } catch {
+            // Ignore.
+          }
+          return;
+        }
+
+        if (!res.ok) throw new Error("watchlist fetch failed");
+        const json = await res.json();
+        if (cancelled) return;
+        const symbols = Array.isArray(json.symbols) ? json.symbols : [];
+        const normalized = symbols
+          .map((item: unknown) => String(item || "").toUpperCase().trim())
+          .filter(Boolean)
+          .slice(-MAX_WATCHLIST);
+        const serverSelected = typeof json.selected_symbol === "string" ? json.selected_symbol : "";
+        if (initialUrlSymbol) {
+          // URL symbol takes precedence over synced watchlist selection.
+          const merged = [initialUrlSymbol, ...normalized.filter((item: string) => item !== initialUrlSymbol)].slice(
+            0,
+            MAX_WATCHLIST
+          );
+          setWatchlist(merged);
+          setSelected(initialUrlSymbol);
+        } else if (normalized.length) {
+          setWatchlist(normalized);
+          setSelected(serverSelected && normalized.includes(serverSelected) ? serverSelected : normalized[0]);
+        }
+        serverHydratedRef.current = true;
+        setShowLogin(false);
+        setSyncState("synced");
+        setSessionAuthorized(true);
+        setAuthChecked(true);
+      } catch {
+        if (!cancelled) {
+          setSyncState("error");
+          setAuthChecked(true);
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, authToken, isEmbedMode, initialUrlSymbol]);
 
   useEffect(() => {
     const override = window.sessionStorage.getItem("fv_ext_override");
@@ -553,7 +620,7 @@ export default function Home() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const symbolParam = embedSymbol || params.get("symbol");
+    const symbolParam = params.get("symbol");
     const tfParam = params.get("tf");
     const extParam = params.get("ext");
     const allFrames = [...ADVANCED_TIMEFRAMES, ...CORE_TIMEFRAMES];
@@ -561,12 +628,20 @@ export default function Home() {
     if (symbolParam) {
       const normalized = normalizeSymbol(symbolParam);
       if (normalized) {
-        setSelected(normalized);
-        setWatchlist((prev) => {
-          if (prev.includes(normalized)) return prev;
-          return [normalized, ...prev].slice(0, MAX_WATCHLIST);
-        });
+        if (isEmbedMode) {
+          setSelected(normalized);
+          setWatchlist([normalized]);
+        } else {
+          setSelected(normalized);
+          setWatchlist((prev) => {
+            if (prev.includes(normalized)) return prev;
+            return [normalized, ...prev].slice(0, MAX_WATCHLIST);
+          });
+        }
       }
+    } else if (isEmbedMode && forcedEmbedSymbol) {
+      setSelected(forcedEmbedSymbol);
+      setWatchlist([forcedEmbedSymbol]);
     }
 
     if (tfParam) {
@@ -583,19 +658,18 @@ export default function Home() {
     }
 
     urlStateReadyRef.current = true;
-  }, []);
+  }, [isEmbedMode, forcedEmbedSymbol]);
 
-  // Guardrail: embed mode is canonically driven by query symbol.
   useEffect(() => {
-    if (!embedConfig.embed || !embedSymbol) return;
-    if (selected !== embedSymbol) {
-      setSelected(embedSymbol);
-      setWatchlist((prev) => {
-        if (prev.includes(embedSymbol)) return prev;
-        return [embedSymbol, ...prev].slice(0, MAX_WATCHLIST);
-      });
+    if (!isEmbedMode || !forcedEmbedSymbol) return;
+    if (selected !== forcedEmbedSymbol) {
+      setSelected(forcedEmbedSymbol);
     }
-  }, [embedConfig.embed, embedSymbol, selected]);
+    setWatchlist((prev) => {
+      if (prev.length === 1 && prev[0] === forcedEmbedSymbol) return prev;
+      return [forcedEmbedSymbol];
+    });
+  }, [isEmbedMode, forcedEmbedSymbol, selected]);
 
   useEffect(() => {
     const storedIndicators = window.localStorage.getItem("fv_indicators");
@@ -617,18 +691,57 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (isEmbedMode) return;
     window.localStorage.setItem("fv_watchlist", JSON.stringify(watchlist));
-  }, [watchlist]);
+  }, [watchlist, isEmbedMode]);
 
   useEffect(() => {
+    if (isEmbedMode) return;
     if (!selected) return;
     window.localStorage.setItem("fv_selected", selected);
-  }, [selected]);
+  }, [selected, isEmbedMode]);
+
+  useEffect(() => {
+    if (isEmbedMode) return;
+    if (!authToken && !sessionAuthorized) return;
+    if (serverSaveTimerRef.current) {
+      window.clearTimeout(serverSaveTimerRef.current);
+    }
+    // Debounce to avoid spamming writes while typing/adding/removing.
+    serverSaveTimerRef.current = window.setTimeout(async () => {
+      try {
+        setSyncState("syncing");
+        const res = await fetch(`${apiBase}/api/watchlist`, {
+          method: "PUT",
+          headers: {
+              "content-type": "application/json",
+              ...(authToken ? { authorization: `Bearer ${authToken}` } : {}),
+            },
+          body: JSON.stringify({ symbols: watchlist, selected_symbol: selected || null }),
+          cache: "no-store",
+        });
+        if (res.status === 401) {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken("");
+          setSyncState("local");
+          setSessionAuthorized(false);
+          setAuthChecked(true);
+          setShowLogin(true);
+          return;
+        }
+        if (!res.ok) throw new Error("watchlist save failed");
+        setSyncState("synced");
+      } catch {
+        setSyncState("error");
+      }
+    }, 650);
+    return () => {
+      if (serverSaveTimerRef.current) window.clearTimeout(serverSaveTimerRef.current);
+    };
+  }, [apiBase, authToken, sessionAuthorized, watchlistKey, selected, isEmbedMode]);
 
   useEffect(() => {
     if (!urlStateReadyRef.current || !selected) return;
-    if (embedConfig.embed) return;
-
     const url = new URL(window.location.href);
     url.searchParams.set("symbol", selected);
     url.searchParams.set("tf", timeframe);
@@ -639,17 +752,6 @@ export default function Home() {
       window.history.replaceState(null, "", next);
     }
   }, [selected, timeframe, extEnabled]);
-
-  useEffect(() => {
-    if (!embedConfig.embed) return;
-
-    const html = document.documentElement;
-    html.classList.add("whomp-embed");
-
-    return () => {
-      html.classList.remove("whomp-embed");
-    };
-  }, [embedConfig.embed]);
 
 
   useEffect(() => {
@@ -677,31 +779,51 @@ export default function Home() {
 
   useEffect(() => {
     if (!selected) return;
-    const key = process.env.NEXT_PUBLIC_MARKETAUX_KEY;
-    if (!key) {
+    if (accessLocked) {
       setNewsItems([]);
-      setNewsError("Add Marketaux API key to enable news.");
+      setNewsError("Sign in to enable news.");
       return;
     }
+
     const controller = new AbortController();
     const fetchNews = async () => {
       try {
-        const url = `https://api.marketaux.com/v1/news/all?symbols=${encodeURIComponent(
-          selected
-        )}&filter_entities=true&language=en&limit=3&api_token=${encodeURIComponent(
-          key
-        )}`;
-        const res = await fetch(url, { signal: controller.signal });
+        const url = `${apiBase}/api/news?symbol=${encodeURIComponent(selected)}&limit=10`;
+        const headers: Record<string, string> = {};
+        if (authToken) {
+          headers.authorization = `Bearer ${authToken}`;
+        }
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers,
+          cache: "no-store",
+        });
+
+        if (res.status === 401) {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken("");
+          setSyncState("local");
+          setSessionAuthorized(false);
+          setAuthChecked(true);
+          setShowLogin(true);
+          setNewsItems([]);
+          setNewsError("Sign in to enable news.");
+          return;
+        }
+
         if (!res.ok) throw new Error("news fetch failed");
-        const json = (await res.json()) as NewsApiResponse;
-        const items = (json.data || [])
-          .map((item: NewsApiItem) => ({
+        const json = (await res.json()) as {
+          items?: Array<{ title?: string; source?: string; time?: string; url?: string }>
+        };
+        const items = (json.items || [])
+          .map((item) => ({
             title: (item.title || "").trim(),
-            source: item.source,
-            time: item.published_at,
+            source: (item.source || "").trim(),
+            time: item.time,
             url: item.url,
           }))
           .filter((item) => item.title.length > 0);
+
         setNewsItems(items);
         setNewsError(null);
       } catch {
@@ -711,9 +833,14 @@ export default function Home() {
         }
       }
     };
+
     fetchNews();
-    return () => controller.abort();
-  }, [selected]);
+    const interval = window.setInterval(fetchNews, 300000);
+    return () => {
+      window.clearInterval(interval);
+      controller.abort();
+    };
+  }, [selected, apiBase, authToken, accessLocked]);
 
   useEffect(() => {
     if (![...ADVANCED_TIMEFRAMES, ...CORE_TIMEFRAMES].includes(timeframe)) {
@@ -828,10 +955,12 @@ export default function Home() {
     });
 
     chart.priceScale("").applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 },
+      // Keep volume histogram compact at the bottom.
+      scaleMargins: { top: isEmbedMode ? 0.88 : 0.8, bottom: 0 },
     });
     chart.priceScale("right").applyOptions({
-      scaleMargins: { top: 0.1, bottom: 0.2 },
+      // Tighter margins prevent large dead space above candles in embed mode.
+      scaleMargins: isEmbedMode ? { top: 0.02, bottom: 0.08 } : { top: 0.06, bottom: 0.14 },
     });
 
     chartApiRef.current = chart;
@@ -997,79 +1126,117 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (selected) return;
-    seriesRef.current?.setData([]);
-    extSeriesRef.current?.setData([]);
-    volumeRef.current?.setData([]);
-    sma20Ref.current?.setData([]);
-    sma50Ref.current?.setData([]);
-    sma200Ref.current?.setData([]);
-    ema12Ref.current?.setData([]);
-    ema26Ref.current?.setData([]);
-    vwapRef.current?.setData([]);
-    rsiSeriesRef.current?.setData([]);
-    candlesRef.current = [];
-    extCandlesRef.current = [];
-    volumeDataRef.current = [];
-    indicatorDataRef.current = {
-      sma20: [],
-      sma50: [],
-      sma200: [],
-      ema12: [],
-      ema26: [],
-      rsi14: [],
-      vwap: [],
-    };
-    rthTimesRef.current = new Set();
-    lastCandleRef.current = null;
-    setOhlc(null);
-    setChartLastBarTs(0);
-    setIndicatorLast({});
-  }, [selected]);
+    const mainSeries = seriesRef.current;
+    if (!mainSeries) return;
+    const hasRth = candles.length > 0;
+    const rthTimes = new Set<number>();
+    if (hasRth) {
+      candles.forEach((c) => rthTimes.add(c.time));
+    }
+    const extFiltered = extEnabled
+      ? extCandles.filter((c) => !rthTimes.has(c.time))
+      : [];
+    const hasExt = extFiltered.length > 0;
 
-  useEffect(() => {
-    volumeRef.current?.setData(showVolume ? volumeDataRef.current : []);
-  }, [showVolume]);
-
-  useEffect(() => {
-    sma20Ref.current?.setData(showSma20 ? indicatorDataRef.current.sma20 : []);
-  }, [showSma20]);
-
-  useEffect(() => {
-    sma50Ref.current?.setData(showSma50 ? indicatorDataRef.current.sma50 : []);
-  }, [showSma50]);
-
-  useEffect(() => {
-    sma200Ref.current?.setData(showSma200 ? indicatorDataRef.current.sma200 : []);
-  }, [showSma200]);
-
-  useEffect(() => {
-    ema12Ref.current?.setData(showEma12 ? indicatorDataRef.current.ema12 : []);
-  }, [showEma12]);
-
-  useEffect(() => {
-    ema26Ref.current?.setData(showEma26 ? indicatorDataRef.current.ema26 : []);
-  }, [showEma26]);
-
-  useEffect(() => {
-    vwapRef.current?.setData(showVwap ? indicatorDataRef.current.vwap : []);
-  }, [showVwap]);
-
-  useEffect(() => {
-    rsiSeriesRef.current?.setData(showRsi ? indicatorDataRef.current.rsi14 : []);
-  }, [showRsi]);
-
-  useEffect(() => {
-    if (!extSeriesRef.current) return;
-    if (!extEnabled) {
-      extSeriesRef.current.setData([]);
+    if (!hasRth && !hasExt) {
+      mainSeries.setData([]);
+      extSeriesRef.current?.setData([]);
+      volumeRef.current?.setData([]);
+      sma20Ref.current?.setData([]);
+      sma50Ref.current?.setData([]);
+      sma200Ref.current?.setData([]);
+      ema12Ref.current?.setData([]);
+      ema26Ref.current?.setData([]);
+      setOhlc(null);
       return;
     }
-    const filtered = extCandlesRef.current.filter(
-      (bar) => !rthTimesRef.current.has(Number(bar.time))
-    );
-    extSeriesRef.current.setData(filtered);
-  }, [extEnabled]);
+
+    mainSeries.setData(candles);
+    if (extSeriesRef.current) {
+      extSeriesRef.current.setData(extFiltered);
+    }
+    if (volumeRef.current) {
+      volumeRef.current.setData(showVolume ? volumeData : []);
+    }
+    if (sma20Ref.current) {
+      sma20Ref.current.setData(showSma20 ? indicatorData.sma20 : []);
+    }
+    if (sma50Ref.current) {
+      sma50Ref.current.setData(showSma50 ? indicatorData.sma50 : []);
+    }
+    if (sma200Ref.current) {
+      sma200Ref.current.setData(showSma200 ? indicatorData.sma200 : []);
+    }
+    if (ema12Ref.current) {
+      ema12Ref.current.setData(showEma12 ? indicatorData.ema12 : []);
+    }
+    if (ema26Ref.current) {
+      ema26Ref.current.setData(showEma26 ? indicatorData.ema26 : []);
+    }
+    if (vwapRef.current) {
+      vwapRef.current.setData(showVwap ? indicatorData.vwap : []);
+    }
+    if (rsiSeriesRef.current) {
+      rsiSeriesRef.current.setData(showRsi ? indicatorData.rsi14 : []);
+    }
+    const lastRth = hasRth ? candles[candles.length - 1] : null;
+    const lastExt = hasExt ? extFiltered[extFiltered.length - 1] : null;
+    let last = lastRth || lastExt;
+    if (lastRth && lastExt && lastExt.time > lastRth.time) {
+      last = lastExt;
+    }
+    if (last) {
+      lastCandleRef.current = last;
+      setOhlc(last);
+    }
+    const timeScale = chartApiRef.current?.timeScale();
+    if (timeScale) {
+      if (defaultViewRef.current) {
+        const timeSet = new Set<number>();
+        candles.forEach((c) => timeSet.add(c.time));
+        if (extFiltered.length) {
+          extFiltered.forEach((c) => timeSet.add(c.time));
+        }
+        const totalBars = timeSet.size;
+        const targetBarsMap: Record<string, number> = {
+          "1m": 240,
+          "5m": 200,
+          "15m": 160,
+          "30m": 140,
+          "1h": 140,
+          "4h": 120,
+          "1d": 120,
+          "1w": 120,
+        };
+        timeScale.resetTimeScale();
+        if (totalBars > 0) {
+          const targetBars = targetBarsMap[timeframe] ?? 140;
+          const to = Math.max(0, totalBars - 1);
+          const from = Math.max(0, to - Math.min(targetBars, totalBars) + 1);
+          const barSpacing = totalBars < 30 ? 4 : totalBars < 80 ? 5 : 6;
+          timeScale.applyOptions({ rightOffset: 6, barSpacing });
+          timeScale.setVisibleLogicalRange({ from, to });
+          chartApiRef.current?.priceScale("right").applyOptions({ autoScale: true });
+        }
+        defaultViewRef.current = false;
+      }
+    }
+  }, [
+    candles,
+    extCandles,
+    extEnabled,
+    timeframe,
+    indicatorData,
+    volumeData,
+    showSma20,
+    showSma50,
+    showSma200,
+    showEma12,
+    showEma26,
+    showVwap,
+    showRsi,
+    showVolume,
+  ]);
 
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
@@ -1095,6 +1262,11 @@ export default function Home() {
   }, [apiBase, searchQuery]);
 
   useEffect(() => {
+    if (accessLocked) {
+      setQuotes({});
+      setQuotesStale(false);
+      return;
+    }
     if (!watchlist.length) {
       setQuotes({});
       setQuotesStale(false);
@@ -1109,9 +1281,18 @@ export default function Home() {
     const fetchQuotes = async () => {
       try {
         const res = await fetch(
-          `${apiBase}/api/quotes?symbols=${encodeURIComponent(symbols)}&ext=1`,
+          `${apiBase}/api/quotes?symbols=${encodeURIComponent(symbols)}&ext=${extEnabled ? "1" : "0"}`,
           { signal: controller.signal }
         );
+        if (res.status === 401) {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken("");
+          setSyncState("local");
+          setSessionAuthorized(false);
+          setAuthChecked(true);
+          setShowLogin(true);
+          return;
+        }
         if (!res.ok) throw new Error("quote fetch failed");
         const json = (await res.json()) as QuotesApiResponse;
         if (!active) return;
@@ -1151,7 +1332,7 @@ export default function Home() {
       eventSource = new EventSource(
         `${apiBase}/api/stream/quotes?symbols=${encodeURIComponent(
           symbols
-        )}&ext=1`
+        )}&ext=${extEnabled ? "1" : "0"}`
       );
       eventSource.onmessage = (event) => {
         if (!active) return;
@@ -1207,7 +1388,7 @@ export default function Home() {
         window.clearInterval(pollId);
       }
     };
-  }, [apiBase, watchlist, watchlistKey]);
+  }, [apiBase, watchlist, watchlistKey, accessLocked]);
 
   const formatPrice = useCallback((value?: number) => {
     if (value === undefined || Number.isNaN(value)) return "--";
@@ -1227,6 +1408,22 @@ export default function Home() {
     if (seconds < 60) return `${seconds}s`;
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
     return `${Math.floor(seconds / 3600)}h`;
+  }, []);
+
+  const formatNewsTimestamp = useCallback((value?: string) => {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return (
+      parsed.toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone: "America/New_York",
+        hour12: true,
+      }) + " ET"
+    );
   }, []);
 
   const formatCountdown = useCallback((seconds: number) => {
@@ -1268,7 +1465,7 @@ export default function Home() {
         id: "sma20",
         label: "SMA20",
         color: "#3cc4ff",
-        value: indicatorLast.sma20 ?? getLatestIndicatorValue(indicatorData.sma20),
+        value: getLatestIndicatorValue(indicatorData.sma20),
       });
     }
     if (showSma50 && hasSma50) {
@@ -1276,7 +1473,7 @@ export default function Home() {
         id: "sma50",
         label: "SMA50",
         color: "#ffb454",
-        value: indicatorLast.sma50 ?? getLatestIndicatorValue(indicatorData.sma50),
+        value: getLatestIndicatorValue(indicatorData.sma50),
       });
     }
     if (showSma200 && hasSma200) {
@@ -1284,7 +1481,7 @@ export default function Home() {
         id: "sma200",
         label: "SMA200",
         color: "#6a7a73",
-        value: indicatorLast.sma200 ?? getLatestIndicatorValue(indicatorData.sma200),
+        value: getLatestIndicatorValue(indicatorData.sma200),
       });
     }
     if (showEma12 && hasEma12) {
@@ -1292,7 +1489,7 @@ export default function Home() {
         id: "ema12",
         label: "EMA12",
         color: "#00d084",
-        value: indicatorLast.ema12 ?? getLatestIndicatorValue(indicatorData.ema12),
+        value: getLatestIndicatorValue(indicatorData.ema12),
       });
     }
     if (showEma26 && hasEma26) {
@@ -1300,7 +1497,7 @@ export default function Home() {
         id: "ema26",
         label: "EMA26",
         color: "#ff5a5f",
-        value: indicatorLast.ema26 ?? getLatestIndicatorValue(indicatorData.ema26),
+        value: getLatestIndicatorValue(indicatorData.ema26),
       });
     }
     if (showVwap && hasVwap) {
@@ -1308,7 +1505,7 @@ export default function Home() {
         id: "vwap",
         label: "VWAP",
         color: "#7aa2ff",
-        value: indicatorLast.vwap ?? getLatestIndicatorValue(indicatorData.vwap),
+        value: getLatestIndicatorValue(indicatorData.vwap),
       });
     }
     if (showRsi && hasRsi) {
@@ -1316,14 +1513,13 @@ export default function Home() {
         id: "rsi",
         label: "RSI14",
         color: "#f97316",
-        value: indicatorLast.rsi14 ?? getLatestIndicatorValue(indicatorData.rsi14),
+        value: getLatestIndicatorValue(indicatorData.rsi14),
       });
     }
     return items;
   }, [
     getLatestIndicatorValue,
     indicatorData,
-    indicatorLast,
     showSma20,
     showSma50,
     showSma200,
@@ -1343,49 +1539,16 @@ export default function Home() {
   );
   const hiddenIndicatorCount = Math.max(0, indicatorLegend.length - visibleIndicatorLegend.length);
   const chartLastTs = useMemo(() => {
-    if (chartLastBarTs > 0) return chartLastBarTs;
+    const lastMain =
+      candles.length > 0 ? Number(candles[candles.length - 1].time) : 0;
+    const lastExt =
+      extEnabled && extCandles.length > 0
+        ? Number(extCandles[extCandles.length - 1].time)
+        : 0;
+    const chartTs = Math.max(lastMain, lastExt);
+    if (chartTs > 0) return chartTs;
     return selectedQuote?.lastTs || 0;
-  }, [chartLastBarTs, selectedQuote?.lastTs]);
-
-  const chartStatus = useMemo(() => {
-    if (!chartLastTs) {
-      return {
-        candleAsOf: null as string | null,
-        delayedMinutes: null as number | null,
-        feed: null as string | null,
-      };
-    }
-
-    const candleAsOf = new Date(chartLastTs * 1000).toISOString();
-    const delayedMinutes = Math.max(0, Math.round(Math.max(0, clockTs / 1000 - chartLastTs) / 60));
-    return {
-      candleAsOf,
-      delayedMinutes,
-      feed: delayedMinutes > 0 ? "delayed" : "live",
-    };
-  }, [chartLastTs, clockTs]);
-
-  const postChartStatus = useCallback(() => {
-    if (!embedConfig.embed || typeof window === "undefined") return;
-    const payload = {
-      type: "WHOMP_CHART_STATUS",
-      symbol: selected,
-      candle_as_of: chartStatus.candleAsOf,
-      delayed_minutes: chartStatus.delayedMinutes,
-      feed: chartStatus.feed,
-      seed: embedConfig.seed,
-    };
-    try {
-      window.parent.postMessage(payload, "*");
-    } catch {
-      // Ignore postMessage failures.
-    }
-  }, [chartStatus.candleAsOf, chartStatus.delayedMinutes, chartStatus.feed, embedConfig.embed, embedConfig.seed, selected]);
-
-  useEffect(() => {
-    if (!embedConfig.embed) return;
-    postChartStatus();
-  }, [embedConfig.embed, postChartStatus]);
+  }, [candles, extCandles, extEnabled, selectedQuote?.lastTs]);
 
   const freshnessLabel = useMemo(() => {
     if (!chartLastTs) return "Last bar --";
@@ -1421,144 +1584,105 @@ export default function Home() {
     return `Upd ${formatAgeShort(age)} ago`;
   }, [clockTs, formatAgeShort, watchlistLastQuoteTs]);
 
-  const buildExtFiltered = useCallback(
-    (rthCandles: Candle[], extCandlesInput: Candle[]) => {
-      if (!extEnabled) return [];
-      if (!extCandlesInput.length) return [];
-      const rthTimes = new Set<number>();
-      rthCandles.forEach((c) => rthTimes.add(Number(c.time)));
-      return extCandlesInput.filter((c) => !rthTimes.has(Number(c.time)));
-    },
-    [extEnabled]
-  );
 
-  const applySnapshotToChart = useCallback(
-    (snapshot: {
-      candles: Candle[];
-      extCandles: Candle[];
-      volume: VolumePoint[];
-      indicators: {
-        sma20: LinePoint[];
-        sma50: LinePoint[];
-        sma200: LinePoint[];
-        ema12: LinePoint[];
-        ema26: LinePoint[];
-        rsi14: LinePoint[];
-        vwap: LinePoint[];
-      };
-    }) => {
-      const mainSeries = seriesRef.current;
-      if (!mainSeries) return;
+  useEffect(() => {
+    watchlistLayoutRef.current = watchlistLayout;
+  }, [watchlistLayout]);
 
-      const extFiltered = buildExtFiltered(snapshot.candles, snapshot.extCandles);
-      volumeDataRef.current = snapshot.volume;
-      indicatorDataRef.current = snapshot.indicators;
-      rthTimesRef.current = new Set(snapshot.candles.map((c) => Number(c.time)));
+  const startWatchlistResize = useCallback((handle: "items" | "selected") => {
+    activeWatchlistHandleRef.current = handle;
+  }, []);
 
-      if (snapshot.candles.length === 0 && extFiltered.length === 0) {
-        mainSeries.setData([]);
-        extSeriesRef.current?.setData([]);
-        volumeRef.current?.setData([]);
-        sma20Ref.current?.setData([]);
-        sma50Ref.current?.setData([]);
-        sma200Ref.current?.setData([]);
-        ema12Ref.current?.setData([]);
-        ema26Ref.current?.setData([]);
-        vwapRef.current?.setData([]);
-        rsiSeriesRef.current?.setData([]);
-        lastCandleRef.current = null;
-        setOhlc(null);
-        setChartLastBarTs(0);
-        return;
-      }
+  const stopWatchlistResize = useCallback(() => {
+    activeWatchlistHandleRef.current = null;
+  }, []);
 
-      mainSeries.setData(snapshot.candles);
-      if (extSeriesRef.current) {
-        extSeriesRef.current.setData(extFiltered);
-      }
-      if (volumeRef.current) {
-        volumeRef.current.setData(showVolume ? snapshot.volume : []);
-      }
-      if (sma20Ref.current) {
-        sma20Ref.current.setData(showSma20 ? snapshot.indicators.sma20 : []);
-      }
-      if (sma50Ref.current) {
-        sma50Ref.current.setData(showSma50 ? snapshot.indicators.sma50 : []);
-      }
-      if (sma200Ref.current) {
-        sma200Ref.current.setData(showSma200 ? snapshot.indicators.sma200 : []);
-      }
-      if (ema12Ref.current) {
-        ema12Ref.current.setData(showEma12 ? snapshot.indicators.ema12 : []);
-      }
-      if (ema26Ref.current) {
-        ema26Ref.current.setData(showEma26 ? snapshot.indicators.ema26 : []);
-      }
-      if (vwapRef.current) {
-        vwapRef.current.setData(showVwap ? snapshot.indicators.vwap : []);
-      }
-      if (rsiSeriesRef.current) {
-        rsiSeriesRef.current.setData(showRsi ? snapshot.indicators.rsi14 : []);
-      }
+  const applyWatchlistResize = useCallback((clientY: number) => {
+    if (!activeWatchlistHandleRef.current) return;
 
-      const lastRth = snapshot.candles.length
-        ? snapshot.candles[snapshot.candles.length - 1]
-        : null;
-      const lastExt = extFiltered.length ? extFiltered[extFiltered.length - 1] : null;
-      let last = lastRth || lastExt;
-      if (lastRth && lastExt && lastExt.time > lastRth.time) {
-        last = lastExt;
-      }
-      if (last) {
-        lastCandleRef.current = last;
-        setOhlc(last);
-        setChartLastBarTs(Number(last.time));
-      }
+    const section = watchlistSectionRef.current;
+    if (!section) return;
 
-      const timeScale = chartApiRef.current?.timeScale();
-      if (timeScale && defaultViewRef.current) {
-        const timeSet = new Set<number>();
-        snapshot.candles.forEach((c) => timeSet.add(Number(c.time)));
-        if (extFiltered.length) {
-          extFiltered.forEach((c) => timeSet.add(Number(c.time)));
-        }
-        const totalBars = timeSet.size;
-        const targetBarsMap: Record<string, number> = {
-          "1m": 240,
-          "5m": 200,
-          "15m": 160,
-          "30m": 140,
-          "1h": 140,
-          "4h": 120,
-          "1d": 120,
-          "1w": 120,
-        };
-        timeScale.resetTimeScale();
-        if (totalBars > 0) {
-          const targetBars = targetBarsMap[timeframe] ?? 140;
-          const to = Math.max(0, totalBars - 1);
-          const from = Math.max(0, to - Math.min(targetBars, totalBars) + 1);
-          const barSpacing = totalBars < 30 ? 4 : totalBars < 80 ? 5 : 6;
-          timeScale.applyOptions({ rightOffset: 6, barSpacing });
-          timeScale.setVisibleLogicalRange({ from, to });
-          chartApiRef.current?.priceScale("right").applyOptions({ autoScale: true });
-        }
-        defaultViewRef.current = false;
+    const rect = section.getBoundingClientRect();
+    if (!rect.height) return;
+
+    const pointerPercent = ((clientY - rect.top) / rect.height) * 100;
+    const current = watchlistLayoutRef.current;
+
+    if (activeWatchlistHandleRef.current === "items") {
+      const nextItems = clampPercent(
+        pointerPercent,
+        WATCHLIST_LAYOUT_MIN_ITEMS,
+        100 - WATCHLIST_LAYOUT_MIN_SELECTED - WATCHLIST_LAYOUT_MIN_NEWS
+      );
+      const nextSelected = clampPercent(
+        100 - nextItems - current.news,
+        WATCHLIST_LAYOUT_MIN_SELECTED,
+        100 - nextItems - WATCHLIST_LAYOUT_MIN_NEWS
+      );
+      const nextNews = 100 - nextItems - nextSelected;
+      if (
+        current.items !== nextItems ||
+        current.selected !== nextSelected ||
+        current.news !== nextNews
+      ) {
+        setWatchlistLayout({ items: nextItems, selected: nextSelected, news: nextNews });
       }
-    },
-    [
-      buildExtFiltered,
-      showEma12,
-      showEma26,
-      showRsi,
-      showSma20,
-      showSma200,
-      showSma50,
-      showVolume,
-      showVwap,
-      timeframe,
-    ]
-  );
+      return;
+    }
+
+    const nextSelected = clampPercent(
+      pointerPercent - current.items,
+      WATCHLIST_LAYOUT_MIN_SELECTED,
+      100 - current.items - WATCHLIST_LAYOUT_MIN_NEWS
+    );
+    const nextNews = 100 - current.items - nextSelected;
+
+    if (
+      current.selected !== nextSelected ||
+      current.news !== nextNews
+    ) {
+      setWatchlistLayout({
+        items: current.items,
+        selected: nextSelected,
+        news: nextNews,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    const onMouseMove = (ev: globalThis.MouseEvent) => {
+      if (!activeWatchlistHandleRef.current) return;
+      applyWatchlistResize(ev.clientY);
+    };
+
+    const onTouchMove = (ev: globalThis.TouchEvent) => {
+      const touch = ev.touches[0];
+      if (!touch || !activeWatchlistHandleRef.current) return;
+      applyWatchlistResize(touch.clientY);
+    };
+
+    const onMouseUp = () => {
+      stopWatchlistResize();
+    };
+
+    const onTouchEnd = () => {
+      stopWatchlistResize();
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd);
+
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [applyWatchlistResize, stopWatchlistResize]);
+
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1567,6 +1691,11 @@ export default function Home() {
     fullFetchSeqRef.current = requestSeq;
 
     const run = async () => {
+      if (accessLocked) {
+        setIsLoading(false);
+        setError("Sign in required to load chart data.");
+        return;
+      }
       if (!selected) {
         setIsLoading(false);
         setError(null);
@@ -1580,18 +1709,30 @@ export default function Home() {
           `${apiBase}/api/data/${encodeURIComponent(selected)}?tf=${encodeURIComponent(
             timeframe
           )}&ext=${extEnabled ? "1" : "0"}`,
-          { signal: controller.signal }
+          {
+            signal: controller.signal,
+            headers: authToken ? { authorization: `Bearer ${authToken}` } : undefined,
+          }
         );
         if (!res.ok) {
+          if (res.status === 401) {
+            window.localStorage.removeItem(AUTH_TOKEN_KEY);
+            setAuthToken("");
+            setSyncState("local");
+            setSessionAuthorized(false);
+            setAuthChecked(true);
+            setShowLogin(true);
+            throw new Error("Sign in required to load chart data.");
+          }
           throw new Error(`No data for ${selected}`);
         }
-        const json = (await res.json()) as DataSnapshotResponse;
+        const json = await res.json();
         if (controller.signal.aborted || requestSeq !== fullFetchSeqRef.current) {
           return;
         }
         const nextCandlesRaw = sanitizeCandles(
           (json.candles || [])
-            .map((item: CandleWire) => ({
+            .map((item: Candle) => ({
               ...item,
               time: toUtcTimestamp(Number(item.time)),
             }))
@@ -1600,7 +1741,7 @@ export default function Home() {
         );
         const nextExtRaw = sanitizeCandles(
           (json.ext_candles || [])
-            .map((item: CandleWire) => ({
+            .map((item: Candle) => ({
               ...item,
               time: toUtcTimestamp(Number(item.time)),
             }))
@@ -1609,89 +1750,68 @@ export default function Home() {
         );
         const nextCandles = filterUnconfirmedSpikeCandles(nextCandlesRaw);
         const nextExt = filterUnconfirmedSpikeCandles(nextExtRaw);
-        const maxBars = MAX_BARS_BY_TF[timeframe] ?? 600;
-        function capArray<T>(arr: T[]): T[] {
-          return arr.length > maxBars ? arr.slice(arr.length - maxBars) : arr;
-        }
-        const nextCandlesCapped = capArray(nextCandles);
-        const nextExtCapped = capArray(nextExt);
         const nextVolume = (json.volume || [])
-          .map((item: VolumePointWire) => ({
+          .map((item: VolumePoint) => ({
             ...item,
             time: toUtcTimestamp(Number(item.time)),
           }))
           .slice()
           .sort((a: VolumePoint, b: VolumePoint) => a.time - b.time);
         const nextIndicators = {
-          sma20: capArray(
-            (json.indicators?.sma20 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          sma50: capArray(
-            (json.indicators?.sma50 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          sma200: capArray(
-            (json.indicators?.sma200 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          ema12: capArray(
-            (json.indicators?.ema12 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          ema26: capArray(
-            (json.indicators?.ema26 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          rsi14: capArray(
-            (json.indicators?.rsi14 || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
-          vwap: capArray(
-            (json.indicators?.vwap || [])
-              .map((item: LinePointWire) => ({
-                ...item,
-                time: toUtcTimestamp(Number(item.time)),
-              }))
-              .slice()
-              .sort((a: LinePoint, b: LinePoint) => a.time - b.time)
-          ),
+          sma20: (json.indicators?.sma20 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          sma50: (json.indicators?.sma50 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          sma200: (json.indicators?.sma200 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          ema12: (json.indicators?.ema12 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          ema26: (json.indicators?.ema26 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          rsi14: (json.indicators?.rsi14 || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
+          vwap: (json.indicators?.vwap || [])
+            .map((item: LinePoint) => ({
+              ...item,
+              time: toUtcTimestamp(Number(item.time)),
+            }))
+            .slice()
+            .sort((a: LinePoint, b: LinePoint) => a.time - b.time),
         };
-        const nextVolumeCapped = capArray(nextVolume);
-        setCandles(nextCandlesCapped);
-        candlesRef.current = nextCandlesCapped;
-        setExtCandles(nextExtCapped);
-        extCandlesRef.current = nextExtCapped;
+        setCandles(nextCandles);
+        candlesRef.current = nextCandles;
+        setExtCandles(nextExt);
+        extCandlesRef.current = nextExt;
         setIndicatorData({
           sma20: nextIndicators.sma20,
           sma50: nextIndicators.sma50,
@@ -1701,45 +1821,9 @@ export default function Home() {
           rsi14: nextIndicators.rsi14,
           vwap: nextIndicators.vwap,
         });
-        setIndicatorLast({
-          sma20: nextIndicators.sma20.length
-            ? nextIndicators.sma20[nextIndicators.sma20.length - 1].value
-            : undefined,
-          sma50: nextIndicators.sma50.length
-            ? nextIndicators.sma50[nextIndicators.sma50.length - 1].value
-            : undefined,
-          sma200: nextIndicators.sma200.length
-            ? nextIndicators.sma200[nextIndicators.sma200.length - 1].value
-            : undefined,
-          ema12: nextIndicators.ema12.length
-            ? nextIndicators.ema12[nextIndicators.ema12.length - 1].value
-            : undefined,
-          ema26: nextIndicators.ema26.length
-            ? nextIndicators.ema26[nextIndicators.ema26.length - 1].value
-            : undefined,
-          vwap: nextIndicators.vwap.length
-            ? nextIndicators.vwap[nextIndicators.vwap.length - 1].value
-            : undefined,
-          rsi14: nextIndicators.rsi14.length
-            ? nextIndicators.rsi14[nextIndicators.rsi14.length - 1].value
-            : undefined,
-        });
-        applySnapshotToChart({
-          candles: nextCandlesCapped,
-          extCandles: nextExtCapped,
-          volume: nextVolumeCapped,
-          indicators: {
-            sma20: nextIndicators.sma20,
-            sma50: nextIndicators.sma50,
-            sma200: nextIndicators.sma200,
-            ema12: nextIndicators.ema12,
-            ema26: nextIndicators.ema26,
-            rsi14: nextIndicators.rsi14,
-            vwap: nextIndicators.vwap,
-          },
-        });
+        setVolumeData(nextVolume);
         lastLoadedDataKeyRef.current = requestKey;
-        if (nextCandlesCapped.length === 0 && nextExtCapped.length === 0) {
+        if (nextCandles.length === 0 && nextExt.length === 0) {
           setError("No data available for this symbol/timeframe.");
         }
       } catch (err) {
@@ -1763,21 +1847,7 @@ export default function Home() {
             rsi14: [],
             vwap: [],
           });
-          setIndicatorLast({});
-          applySnapshotToChart({
-            candles: [],
-            extCandles: [],
-            volume: [],
-            indicators: {
-              sma20: [],
-              sma50: [],
-              sma200: [],
-              ema12: [],
-              ema26: [],
-              rsi14: [],
-              vwap: [],
-            },
-          });
+          setVolumeData([]);
         }
         setError(
           hasExisting && sameContext
@@ -1796,9 +1866,10 @@ export default function Home() {
     return () => {
       controller.abort();
     };
-  }, [apiBase, applySnapshotToChart, selected, timeframe, extEnabled]);
+  }, [apiBase, selected, timeframe, extEnabled, authToken, accessLocked]);
 
   useEffect(() => {
+    if (accessLocked) return;
     if (!watchlist.length) return;
     const symbols = Array.from(new Set([selected, ...watchlist].filter(Boolean)));
     const timer = window.setTimeout(() => {
@@ -1809,9 +1880,13 @@ export default function Home() {
       ).catch(() => undefined);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [apiBase, selected, watchlist, watchlistKey, timeframe, extEnabled]);
+  }, [apiBase, selected, watchlist, watchlistKey, timeframe, extEnabled, accessLocked]);
 
   useEffect(() => {
+    if (accessLocked) {
+      setStreamMode("polling");
+      return;
+    }
     if (!selected) return;
     const pollMsByTf: Record<string, number> = {
       "1m": 3000,
@@ -1920,173 +1995,34 @@ export default function Home() {
         incomingIndicators.vwap.length > 0;
       if (!hasAny) return;
       setError(null);
-
-      const maxBars = MAX_BARS_BY_TF[timeframe] ?? 600;
-
-      const upsertTail = <T extends { time: UTCTimestamp }>(arr: T[], incoming: T[]) => {
-        const tailScan = 6;
-        for (const item of incoming) {
-          const t = Number(item.time);
-          const last = arr.length ? Number(arr[arr.length - 1].time) : null;
-          if (last == null) {
-            arr.push(item);
-            continue;
-          }
-          if (t === last) {
-            arr[arr.length - 1] = item;
-            continue;
-          }
-          if (t > last) {
-            arr.push(item);
-            continue;
-          }
-          // Rare: out-of-order update; search recent tail for exact match.
-          for (let i = arr.length - 1; i >= 0 && arr.length - 1 - i < tailScan; i -= 1) {
-            if (Number(arr[i].time) === t) {
-              arr[i] = item;
-              break;
-            }
-          }
-        }
-        if (arr.length > maxBars) {
-          arr.splice(0, arr.length - maxBars);
-        }
-      };
-
-      const mainSeries = seriesRef.current;
-      const extSeries = extSeriesRef.current;
-      const volSeries = volumeRef.current;
-
       if (incomingCandles.length) {
-        upsertTail(candlesRef.current, incomingCandles);
-        for (const bar of incomingCandles) {
-          rthTimesRef.current.add(Number(bar.time));
-          mainSeries?.update(bar);
-          lastCandleRef.current = bar;
-        }
+        setCandles((prev) => {
+          const merged = mergeByTime(prev, incomingCandles);
+          const filtered = filterUnconfirmedSpikeCandles(merged);
+          candlesRef.current = filtered;
+          return filtered;
+        });
       }
-
-      const filteredExtIncoming = incomingExt.filter(
-        (bar) => !rthTimesRef.current.has(Number(bar.time))
-      );
-      if (filteredExtIncoming.length) {
-        upsertTail(extCandlesRef.current, filteredExtIncoming);
-        if (extEnabledRef.current && extSeries) {
-          for (const bar of filteredExtIncoming) {
-            extSeries.update(bar);
-            lastCandleRef.current = bar;
-          }
-        }
+      if (incomingExt.length) {
+        setExtCandles((prev) => {
+          const merged = mergeByTime(prev, incomingExt);
+          const filtered = filterUnconfirmedSpikeCandles(merged);
+          extCandlesRef.current = filtered;
+          return filtered;
+        });
       }
-
       if (incomingVolume.length) {
-        upsertTail(volumeDataRef.current, incomingVolume);
-        if (togglesRef.current.showVolume && volSeries) {
-          for (const bar of incomingVolume) {
-            volSeries.update(bar);
-          }
-        }
+        setVolumeData((prev) => mergeByTime(prev, incomingVolume));
       }
-
-      const nextLast: {
-        sma20?: number;
-        sma50?: number;
-        sma200?: number;
-        ema12?: number;
-        ema26?: number;
-        vwap?: number;
-        rsi14?: number;
-      } = {};
-
-      const updateIndicator = (
-        key: keyof typeof indicatorDataRef.current,
-        incoming: LinePoint[],
-        enabled: boolean,
-        series: ISeriesApi<"Line"> | null | undefined
-      ) => {
-        if (!incoming.length) return;
-        upsertTail(indicatorDataRef.current[key], incoming);
-        const last = incoming[incoming.length - 1];
-        if (enabled && series) {
-          series.update(last);
-        }
-        if (key === "sma20") nextLast.sma20 = last.value;
-        if (key === "sma50") nextLast.sma50 = last.value;
-        if (key === "sma200") nextLast.sma200 = last.value;
-        if (key === "ema12") nextLast.ema12 = last.value;
-        if (key === "ema26") nextLast.ema26 = last.value;
-        if (key === "vwap") nextLast.vwap = last.value;
-        if (key === "rsi14") nextLast.rsi14 = last.value;
-      };
-
-      updateIndicator(
-        "sma20",
-        incomingIndicators.sma20,
-        togglesRef.current.showSma20,
-        sma20Ref.current
-      );
-      updateIndicator(
-        "sma50",
-        incomingIndicators.sma50,
-        togglesRef.current.showSma50,
-        sma50Ref.current
-      );
-      updateIndicator(
-        "sma200",
-        incomingIndicators.sma200,
-        togglesRef.current.showSma200,
-        sma200Ref.current
-      );
-      updateIndicator(
-        "ema12",
-        incomingIndicators.ema12,
-        togglesRef.current.showEma12,
-        ema12Ref.current
-      );
-      updateIndicator(
-        "ema26",
-        incomingIndicators.ema26,
-        togglesRef.current.showEma26,
-        ema26Ref.current
-      );
-      updateIndicator(
-        "vwap",
-        incomingIndicators.vwap,
-        togglesRef.current.showVwap,
-        vwapRef.current
-      );
-      updateIndicator(
-        "rsi14",
-        incomingIndicators.rsi14,
-        togglesRef.current.showRsi,
-        rsiSeriesRef.current
-      );
-
-      if (Object.keys(nextLast).length) {
-        setIndicatorLast((prev) => ({ ...prev, ...nextLast }));
-      }
-
-      const lastRth = candlesRef.current.length
-        ? candlesRef.current[candlesRef.current.length - 1]
-        : null;
-      let lastExt: Candle | null = null;
-      for (let i = extCandlesRef.current.length - 1; i >= 0; i -= 1) {
-        const bar = extCandlesRef.current[i];
-        if (!rthTimesRef.current.has(Number(bar.time))) {
-          lastExt = bar;
-          break;
-        }
-      }
-      const last = (() => {
-        if (lastRth && lastExt) {
-          return lastExt.time > lastRth.time ? lastExt : lastRth;
-        }
-        return lastRth || lastExt;
-      })();
-      if (last) {
-        setChartLastBarTs(Number(last.time));
-        setOhlc(last);
-      }
+      setIndicatorData((prev) => ({
+        sma20: mergeByTime(prev.sma20, incomingIndicators.sma20),
+        sma50: mergeByTime(prev.sma50, incomingIndicators.sma50),
+        sma200: mergeByTime(prev.sma200, incomingIndicators.sma200),
+        ema12: mergeByTime(prev.ema12, incomingIndicators.ema12),
+        ema26: mergeByTime(prev.ema26, incomingIndicators.ema26),
+        rsi14: mergeByTime(prev.rsi14, incomingIndicators.rsi14),
+        vwap: mergeByTime(prev.vwap, incomingIndicators.vwap),
+      }));
     };
 
     const runDeltaFetch = async () => {
@@ -2108,6 +2044,15 @@ export default function Home() {
             extEnabled ? "1" : "0"
           }&since=${since}`
         );
+        if (res.status === 401) {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken("");
+          setSyncState("local");
+          setSessionAuthorized(false);
+          setAuthChecked(true);
+          setShowLogin(true);
+          return;
+        }
         if (!res.ok) return;
         const json = await res.json();
         applyDelta(json);
@@ -2211,7 +2156,7 @@ export default function Home() {
         source = null;
       }
     };
-  }, [apiBase, selected, timeframe, extEnabled]);
+  }, [apiBase, selected, timeframe, extEnabled, accessLocked]);
 
   const renderSparkline = (values: number[] | undefined, color: string) => {
     if (!values || values.length < 2) {
@@ -2277,6 +2222,46 @@ export default function Home() {
     setChartMenu((prev) => ({ ...prev, open: false }));
   }, []);
 
+  const handleChartsLogin = useCallback(async () => {
+    setLoginError(null);
+    const username = loginUsername.trim();
+    const password = loginPassword;
+    if (!username || !password) {
+      setLoginError("Enter email/username and password");
+      return;
+    }
+    try {
+      setSyncState("syncing");
+      const res = await fetch(`${apiBase}/api/auth/login`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username, password }),
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSyncState("error");
+        setLoginError(String((json as any).detail || "Login failed"));
+        return;
+      }
+      const token = typeof (json as any).access_token === "string" ? (json as any).access_token : "";
+      if (!token) {
+        setSyncState("error");
+        setLoginError("Login succeeded but no token returned");
+        return;
+      }
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+      setAuthToken(token);
+      setSessionAuthorized(true);
+      setAuthChecked(true);
+      setLoginPassword("");
+      setShowLogin(false);
+    } catch {
+      setSyncState("error");
+      setLoginError("Login failed");
+    }
+  }, [apiBase, loginUsername, loginPassword]);
+
   const ohlcChange = ohlc ? ((ohlc.close - ohlc.open) / ohlc.open) * 100 : null;
   const ohlcUp = ohlc ? ohlc.close >= ohlc.open : null;
 
@@ -2308,20 +2293,6 @@ export default function Home() {
     });
   };
 
-  if (embedConfig.canvasOnly) {
-    return (
-      <div className="chart-embed-shell">
-        <div className="chart-stage chart-stage--embed">
-          <div
-            className="chart-container chart-container--embed"
-            ref={chartRef}
-            aria-label="Embedded chart canvas"
-          />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="app-shell">
       <header className="tv-toolbar">
@@ -2334,7 +2305,7 @@ export default function Home() {
               <div className="tv-ticker">{selected || "--"}</div>
               <div className="tv-name-row">
                 <span className="tv-name">{headerName || "—"}</span>
-                {headerExchange && <span className="tv-exchange">{headerExchange}</span>}
+                {headerExchange !== "—" && <span className="tv-exchange">{headerExchange}</span>}
                 {headerSession && headerSession !== "rth" && (
                   <span className="session-badge">{headerSession.toUpperCase()}</span>
                 )}
@@ -2373,6 +2344,22 @@ export default function Home() {
           ))}
         </div>
         <div className="tv-right">
+          {!isEmbedMode && (
+            <nav className="tv-app-nav" aria-label="Whomp sections">
+              <a className="tv-app-link" href="https://whomp.ai/alphaai">
+                Alpha AI
+              </a>
+              <a className="tv-app-link" href="https://whomp.ai/flow-tape">
+                Flow Tape
+              </a>
+              <a className="tv-app-link" href="https://whomp.ai/news">
+                The Wire
+              </a>
+              <a className="tv-app-link" href="https://whomp.ai/ticker/NVDA">
+                Ticker Intel
+              </a>
+            </nav>
+          )}
           <div className="tv-actions">
             <div className="indicator-control">
               <button
@@ -2544,7 +2531,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="main-container">
+      <div className={`main-container${isEmbedMode ? " embed-mode" : ""}${isCanvasOnly ? " embed-canvas" : ""}`}>
         <div className="chart-section">
           <div className="chart-header">
             <div className="chart-ohlc">
@@ -2642,38 +2629,48 @@ export default function Home() {
           </div>
         </div>
 
-        <aside className="watchlist-section">
+        {!isEmbedMode && <aside className="watchlist-section" ref={watchlistSectionRef}>
           <div className="watchlist-header">
-            <span>Watchlist</span>
+            <span className="watchlist-title">Watchlist</span>
             <div className="watchlist-meta">
-              <span
-                className={`watchlist-state ${quotesStale ? "is-stale" : "is-live"}`}
-                title={
-                  quotesStale
-                    ? "Using cached quotes due to upstream delay/error."
-                    : "Receiving delayed stream updates."
-                }
-              >
-                {quotesStale ? "Stale" : "Live"}
+              <div className="watchlist-title-meta">
+                <span
+                  className={"chart-chip watchlist-state " + (quotesStale ? "is-stale" : "is-live")}
+                  title={
+                    quotesStale
+                      ? "Using cached quotes due to upstream delay/error."
+                      : "Receiving delayed stream updates."
+                  }
+                >
+                  {quotesStale ? "Stale" : "Live"}
+                </span>
+                <span
+                  className="chart-chip watchlist-updated"
+                  title={
+                    watchlistLastQuoteTs
+                      ? "Latest quote " + new Date(
+                          watchlistLastQuoteTs * 1000
+                        ).toLocaleTimeString("en-US", {
+                          hour: "numeric",
+                          minute: "2-digit",
+                          second: "2-digit",
+                          hour12: true,
+                        })
+                      : "No quote timestamp yet."
+                  }
+                >
+                  {watchlistFreshnessLabel}
+                </span>
+              </div>
+              {!sessionAuthorized ? (
+                <button className="chart-chip watch-auth" onClick={() => setShowLogin(true)} title="Sign in to sync watchlist across devices">
+                  Sign in
+                </button>
+              ) : null}
+              <span className={"chart-chip watch-sync " + "watch-sync-" + syncState} title="Watchlist sync status">
+                {syncState === "synced" ? "Synced" : syncState === "syncing" ? "Syncing" : syncState === "error" ? "Sync error" : "Local"}
               </span>
-              <span
-                className="watchlist-updated"
-                title={
-                  watchlistLastQuoteTs
-                    ? `Latest quote ${new Date(
-                        watchlistLastQuoteTs * 1000
-                      ).toLocaleTimeString("en-US", {
-                        hour: "numeric",
-                        minute: "2-digit",
-                        second: "2-digit",
-                        hour12: true,
-                      })}`
-                    : "No quote timestamp yet."
-                }
-              >
-                {watchlistFreshnessLabel}
-              </span>
-              <span className="watchlist-count">{watchlist.length} Active</span>
+              <span className="chart-chip watchlist-count">{watchlist.length} Active</span>
             </div>
           </div>
           <div className="watchlist-controls">
@@ -2707,23 +2704,26 @@ export default function Home() {
           {searchResults.length > 0 && (
             <div className="search-results active">
               {searchResults.map((item) => (
-                <div
+                <button
                   key={`${item.symbol}-${item.exchange}`}
                   className="search-item"
+                  type="button"
                   onClick={() => addSymbol(item.symbol)}
+                  aria-label={`Add ${item.symbol} to watchlist`}
                 >
                   <div className="search-main">
                     <div className="search-symbol">{item.symbol}</div>
                     <div className="search-name">{item.name}</div>
                   </div>
                   <div className="search-meta">
-                    {[item.exchange, item.type].filter(Boolean).join(" · ")}
+                    {[formatExchangeLabel(item.exchange, item.symbol), item.type].filter(Boolean).join(" · ")}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}
-          <div className="watchlist-items">
+          <div className="watchlist-body">
+            <div className="watchlist-items" style={{ flex: "0 0 " + watchlistLayout.items + "%" }}>
             {watchlist.map((symbol) => {
               const quote = quotes[symbol];
               const changeClass =
@@ -2751,7 +2751,7 @@ export default function Home() {
                     <div className="sym-info">
                       <div className="sym-symbol">{symbol}</div>
                       <div className="sym-name">
-                        {quote?.exchange || "—"}
+                        {formatExchangeLabel(quote?.exchange, symbol)}
                       </div>
                     </div>
                   </div>
@@ -2768,6 +2768,7 @@ export default function Home() {
                       e.stopPropagation();
                       removeSymbol(symbol);
                     }}
+                    aria-label={`Remove ${symbol} from watchlist`}
                   >
                     x
                   </button>
@@ -2775,7 +2776,8 @@ export default function Home() {
               );
             })}
           </div>
-          <div className="watchlist-detail">
+          <div className="watchlist-split-handle" role="separator" aria-orientation="horizontal" aria-label="Resize watchlist list and selected section" onMouseDown={(event) => { event.preventDefault(); startWatchlistResize("items"); }} onTouchStart={(event) => { event.preventDefault(); startWatchlistResize("items"); }} />
+            <div className="watchlist-detail" style={{ flex: "0 0 " + watchlistLayout.selected + "%" }}>
             <div className="detail-head">
               <div>
                 <div className="detail-label">Selected</div>
@@ -2844,7 +2846,7 @@ export default function Home() {
               )}
             </div>
             <div className="detail-exchange">
-              {quotes[selected]?.exchange || "—"}
+              {formatExchangeLabel(quotes[selected]?.exchange, selected)}
             </div>
             {selectedQuote?.lastTs && (
               <div className="detail-updated">
@@ -2858,7 +2860,8 @@ export default function Home() {
               </div>
             )}
           </div>
-          <div className="watchlist-news">
+          <div className="watchlist-split-handle" role="separator" aria-orientation="horizontal" aria-label="Resize selected and news section" onMouseDown={(event) => { event.preventDefault(); startWatchlistResize("selected"); }} onTouchStart={(event) => { event.preventDefault(); startWatchlistResize("selected"); }} />
+            <div className="watchlist-news" style={{ flex: "0 0 " + watchlistLayout.news + "%" }}>
             <div className="detail-label">News</div>
             {newsError && (
               <div className="news-empty">{newsError}</div>
@@ -2878,12 +2881,53 @@ export default function Home() {
                   <div className="news-title">{item.title}</div>
                   <div className="news-meta">
                     {item.source || "—"}
-                    {item.time ? ` · ${new Date(item.time).toLocaleString()}` : ""}
+                    {item.time ? ` · ${formatNewsTimestamp(item.time)}` : ""}
                   </div>
                 </a>
               ))}
+            </div>
           </div>
-        </aside>
+        </aside>}
+
+        {accessLocked && (
+          <div className="charts-lock-overlay">
+            <div className="charts-lock-card">
+              <div className="charts-lock-title">Sign in required</div>
+              <div className="charts-lock-subtitle">
+                Charts are available to authenticated Whomp users. Your watchlist and selected
+                ticker sync to your account after sign in.
+              </div>
+              <button className="charts-lock-cta" onClick={() => setShowLogin(true)}>
+                Sign in to continue
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!isEmbedMode && showLogin && (
+          <div className="charts-login-backdrop" onMouseDown={() => setShowLogin(false)}>
+            <div className="charts-login-modal" onMouseDown={(e) => e.stopPropagation()}>
+              <div className="charts-login-title">Sync Watchlist</div>
+              <div className="charts-login-sub">Sign in to save your watchlist per user.</div>
+              <div className="charts-login-grid">
+                <label>
+                  <span>Email or username</span>
+                  <input value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} placeholder="you@example.com" autoComplete="username" />
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} autoComplete="current-password" />
+                </label>
+              </div>
+              {loginError && <div className="charts-login-error">{loginError}</div>}
+              <div className="charts-login-actions">
+                <button className="charts-login-cancel" onClick={() => setShowLogin(false)}>Cancel</button>
+                <button className="charts-login-primary" onClick={handleChartsLogin}>Sign in</button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );
