@@ -138,9 +138,12 @@ body {
 .tv-app-nav {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: nowrap;
   white-space: nowrap;
+  padding-left: 10px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(36, 56, 48, 0.9);
 }
 
 .tv-app-link {
@@ -189,7 +192,7 @@ body {
 
 .tv-right {
   justify-content: flex-end;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -203,7 +206,11 @@ body {
 
 .tv-actions {
   margin-left: 0;
-  padding-right: 4px;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 1px solid rgba(0, 208, 132, 0.2);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(7, 18, 14, 0.7), rgba(5, 12, 10, 0.62));
 }
 
 .tv-status {
@@ -1582,6 +1589,12 @@ body {
     flex-wrap: wrap;
   }
 
+  .tv-app-nav {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+  }
+
   .main-container {
     min-height: calc(100vh - 56px);
     height: auto;
@@ -1702,6 +1715,13 @@ body {
     padding: 0 7px;
     font-size: 8px;
     letter-spacing: 0.6px;
+  }
+
+  .tv-actions {
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
   }
 
   .tv-center::-webkit-scrollbar {
