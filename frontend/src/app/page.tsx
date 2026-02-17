@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import {
+import React, {
   useCallback,
   useEffect,
   useMemo,
@@ -194,16 +194,13 @@ const CORE_TIMEFRAMES = ["1h", "4h", "1d", "1w"];
 const ADVANCED_TIMEFRAMES = ["1m", "5m", "15m", "30m"];
 const DEFAULT_TIMEFRAME = "1h";
 const MAX_WATCHLIST = 50;
-const WATCHLIST_LAYOUT_DEFAULT = { items: 40, selected: 24, news: 36 };
-const WATCHLIST_LAYOUT_MIN_ITEMS = 18;
-const WATCHLIST_LAYOUT_MIN_SELECTED = 16;
-const WATCHLIST_LAYOUT_MIN_NEWS = 20;
-
-const clampPercent = (value: number, min: number, max: number): number => {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
-};
+const DEFAULT_WATCHLIST_WIDTH = 340;
+const MIN_WATCHLIST_WIDTH = 280;
+const MIN_CHART_WIDTH = 460;
+const DEFAULT_WATCHLIST_LIST_HEIGHT = 210;
+const MIN_WATCHLIST_LIST_HEIGHT = 120;
+const MIN_WATCHLIST_DETAIL_HEIGHT = 220;
+const MIN_WATCHLIST_NEWS_HEIGHT = 100;
 const AUTH_TOKEN_KEY = "fv_auth_token";
 const TIMEFRAME_SECONDS: Record<string, number> = {
   "1m": 60,
@@ -214,6 +211,22 @@ const TIMEFRAME_SECONDS: Record<string, number> = {
   "4h": 14400,
   "1d": 86400,
   "1w": 604800,
+};
+const EXCHANGE_LABEL_MAP: Record<string, string> = {
+  NASDAQ: "NASDAQ",
+  NMS: "NASDAQ",
+  XNAS: "NASDAQ",
+  XNMS: "NASDAQ",
+  XNCM: "NASDAQ",
+  NYSE: "NYSE",
+  XNYS: "NYSE",
+  NYQ: "NYSE",
+  ARCA: "NYSE ARCA",
+  ARCX: "NYSE ARCA",
+  BATS: "CBOE",
+  BZX: "CBOE",
+  CBOE: "CBOE",
+  IEX: "IEX",
 };
 
 export default function Home() {
@@ -248,49 +261,37 @@ export default function Home() {
     width: 0,
     height: 0,
   });
+  const mainContainerRef = useRef<HTMLDivElement | null>(null);
+  const watchlistSectionRef = useRef<HTMLElement | null>(null);
+  const watchlistItemsRef = useRef<HTMLDivElement | null>(null);
+  const watchlistVsplitRef = useRef<HTMLDivElement | null>(null);
+  const watchlistDetailRef = useRef<HTMLDivElement | null>(null);
+  const watchlistNewsRef = useRef<HTMLDivElement | null>(null);
+  const watchlistResizeFrameRef = useRef<number | null>(null);
+  const watchlistListResizeFrameRef = useRef<number | null>(null);
+  const watchlistResizeStateRef = useRef({
+    active: false,
+    startX: 0,
+    pointerId: -1,
+    startWidth: DEFAULT_WATCHLIST_WIDTH,
+    minWidth: MIN_WATCHLIST_WIDTH,
+    maxWidth: 0,
+  });
+  const watchlistListResizeStateRef = useRef({
+    active: false,
+    startY: 0,
+    pointerId: -1,
+    startHeight: DEFAULT_WATCHLIST_LIST_HEIGHT,
+    minHeight: MIN_WATCHLIST_LIST_HEIGHT,
+    maxHeight: 0,
+  });
+  const watchlistWidthRef = useRef<number>(DEFAULT_WATCHLIST_WIDTH);
+  const watchlistListHeightRef = useRef<number>(DEFAULT_WATCHLIST_LIST_HEIGHT);
   const urlStateReadyRef = useRef<boolean>(false);
   const fullFetchSeqRef = useRef<number>(0);
   const lastLoadedDataKeyRef = useRef<string>("");
-  const [embedConfig] = useState(() => {
-    if (typeof window === "undefined") {
-      return { isEmbed: false, forcedSymbol: "" };
-    }
-    const params = new URLSearchParams(window.location.search);
-    const rawSymbol = (params.get("symbol") ?? "")
-      .toUpperCase()
-      .trim()
-      .replace(/[^A-Z0-9=.\-^/]/g, "");
-    const chromeOff = params.get("chrome") == "0";
-    const mode = (params.get("mode") ?? "").toLowerCase();
-    return {
-      isEmbed: params.get("embed") === "1",
-      forcedSymbol: rawSymbol,
-      chromeOff,
-      canvasOnly: chromeOff && mode == "canvas",
-    };
-  });
-  const isEmbedMode = embedConfig.isEmbed;
-  const forcedEmbedSymbol = embedConfig.forcedSymbol;
-  const initialUrlSymbol = forcedEmbedSymbol;
 
-  const isCanvasOnly = isEmbedMode && !!(embedConfig as any).canvasOnly;
-
-  useEffect(() => {
-    if (!isEmbedMode) return;
-    document.documentElement.classList.add("whomp-embed");
-    if (isCanvasOnly) document.documentElement.classList.add("whomp-embed-canvas");
-    return () => {
-      document.documentElement.classList.remove("whomp-embed");
-      document.documentElement.classList.remove("whomp-embed-canvas");
-    };
-  }, [isEmbedMode, isCanvasOnly]);
-
-  const [watchlist, setWatchlist] = useState<string[]>(
-    () =>
-      isEmbedMode && forcedEmbedSymbol
-        ? [forcedEmbedSymbol]
-        : DEFAULT_WATCHLIST
-  );
+  const [watchlist, setWatchlist] = useState<string[]>(DEFAULT_WATCHLIST);
   const [authToken, setAuthToken] = useState<string>("");
   const [authChecked, setAuthChecked] = useState<boolean>(false);
   const [sessionAuthorized, setSessionAuthorized] = useState<boolean>(false);
@@ -301,20 +302,11 @@ export default function Home() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const serverHydratedRef = useRef<boolean>(false);
   const serverSaveTimerRef = useRef<number | null>(null);
-  const [selected, setSelected] = useState<string>(
-    () =>
-      isEmbedMode && forcedEmbedSymbol
-        ? forcedEmbedSymbol
-        : DEFAULT_WATCHLIST[0]
-  );
+  const [selected, setSelected] = useState<string>(DEFAULT_WATCHLIST[0]);
   const [timeframe, setTimeframe] = useState<string>(DEFAULT_TIMEFRAME);
   const [extEnabled, setExtEnabled] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [searchResults, setSearchResults] = useState<SymbolResult[]>([]);
-  const [watchlistLayout, setWatchlistLayout] = useState(WATCHLIST_LAYOUT_DEFAULT);
-  const watchlistLayoutRef = useRef(WATCHLIST_LAYOUT_DEFAULT);
-  const watchlistSectionRef = useRef<HTMLDivElement | null>(null);
-  const activeWatchlistHandleRef = useRef<"items" | "selected" | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [extCandles, setExtCandles] = useState<Candle[]>([]);
   const [indicatorData, setIndicatorData] = useState<{
@@ -342,6 +334,13 @@ export default function Home() {
   const [health, setHealth] = useState<string>("offline");
   const [streamMode, setStreamMode] = useState<"stream" | "reconnecting" | "polling">("stream");
   const [clockTs, setClockTs] = useState<number>(Date.now());
+  const [watchlistWidth, setWatchlistWidth] = useState<number>(DEFAULT_WATCHLIST_WIDTH);
+  const [isResizingWatchlist, setIsResizingWatchlist] = useState<boolean>(false);
+  const [watchlistListHeight, setWatchlistListHeight] = useState<number>(
+    DEFAULT_WATCHLIST_LIST_HEIGHT
+  );
+  const [isResizingWatchlistList, setIsResizingWatchlistList] =
+    useState<boolean>(false);
   const [chartMenu, setChartMenu] = useState<{
     open: boolean;
     x: number;
@@ -365,7 +364,7 @@ export default function Home() {
   const headerPrice = selectedQuote?.price;
   const headerChange = selectedQuote?.changePct;
   const headerName = selectedQuote?.name;
-  const headerExchange = formatExchangeLabel(selectedQuote?.exchange, selected);
+  const headerExchange = selectedQuote?.exchange;
   const headerSession = selectedQuote?.session;
   const detailRthPrice = selectedQuote?.rthPrice ?? selectedQuote?.price;
   const detailRthChange = selectedQuote?.rthChange ?? selectedQuote?.change;
@@ -380,52 +379,11 @@ export default function Home() {
   const extDetailLabel =
     selectedQuote?.session === "pre" ? "Pre" : "Post";
   const watchlistKey = useMemo(() => watchlist.join(","), [watchlist]);
-  const accessLocked = !isEmbedMode && authChecked && !sessionAuthorized;
+  const accessLocked = authChecked && !sessionAuthorized;
 
   const normalizeSymbol = (value: string): string =>
     value.toUpperCase().trim().replace(/[^A-Z0-9=.\-^/]/g, "");
 
-  function formatExchangeLabel(exchange?: string, symbol?: string): string {
-    const code = (exchange || "").toUpperCase().trim();
-    const symbolText = (symbol || "").toUpperCase().trim();
-
-    if (!code && !symbolText) return "—";
-
-    if (symbolText === "NQ" || symbolText === "ES") return symbolText;
-    if (symbolText === "QQQ" || symbolText === "SPY") return symbolText;
-
-    const normalized = code.replace(/[^A-Z0-9]/g, "");
-    if (!normalized) return "—";
-
-    if (
-      normalized.includes("NMS") ||
-      normalized.includes("XNMS") ||
-      normalized.includes("XNCM") ||
-      normalized.includes("XNAS") ||
-      normalized.includes("NSDQ") ||
-      normalized.includes("NASD") ||
-      normalized.includes("NASDAQ")
-    ) {
-      return "NASDAQ";
-    }
-
-    const exchangeMap: Record<string, string> = {
-      BATS: "BATS",
-      ARCA: "ARCA",
-      XASE: "AMEX",
-      AMEX: "AMEX",
-      NYS: "NYSE",
-      NYQ: "NYSE",
-      XNYS: "NYSE",
-      CBOE: "CBOE",
-      CME: "CME",
-      NYMEX: "NYMEX",
-      COMEX: "COMEX",
-      ICE: "ICE",
-    };
-
-    return exchangeMap[normalized] || normalized;
-  };
   const isRthSession = () => {
     try {
       const parts = new Intl.DateTimeFormat("en-US", {
@@ -468,6 +426,93 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    watchlistWidthRef.current = watchlistWidth;
+    if (watchlistSectionRef.current) {
+      watchlistSectionRef.current.style.width = `${watchlistWidth}px`;
+    }
+  }, [watchlistWidth]);
+
+  useEffect(() => {
+    watchlistListHeightRef.current = watchlistListHeight;
+    if (watchlistItemsRef.current) {
+      watchlistItemsRef.current.style.height = `${watchlistListHeight}px`;
+    }
+  }, [watchlistListHeight]);
+
+  const getWatchlistListMaxHeight = useCallback(() => {
+    const section = watchlistSectionRef.current;
+    const items = watchlistItemsRef.current;
+    const split = watchlistVsplitRef.current;
+    if (!section || !items) return MIN_WATCHLIST_LIST_HEIGHT;
+
+    const sectionRect = section.getBoundingClientRect();
+    const itemsRect = items.getBoundingClientRect();
+    const topOffset = Math.max(0, Math.floor(itemsRect.top - sectionRect.top));
+    const splitHeight = Math.max(
+      8,
+      Math.floor(split?.getBoundingClientRect().height || 12)
+    );
+
+    let minDetailHeight = MIN_WATCHLIST_DETAIL_HEIGHT;
+    const detail = watchlistDetailRef.current;
+    const news = watchlistNewsRef.current;
+    if (detail && news) {
+      const detailRect = detail.getBoundingClientRect();
+      const newsRect = news.getBoundingClientRect();
+      const fixedDetail = Math.max(0, Math.floor(newsRect.top - detailRect.top));
+      minDetailHeight = Math.max(
+        MIN_WATCHLIST_DETAIL_HEIGHT,
+        fixedDetail + MIN_WATCHLIST_NEWS_HEIGHT
+      );
+    }
+
+    return Math.max(
+      MIN_WATCHLIST_LIST_HEIGHT,
+      Math.floor(sectionRect.height - topOffset - splitHeight - minDetailHeight)
+    );
+  }, []);
+
+  useEffect(() => {
+    const clampWidth = () => {
+      const container = mainContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const maxWidth = Math.max(MIN_WATCHLIST_WIDTH, Math.floor(rect.width - MIN_CHART_WIDTH));
+      const nextWidth = Math.max(MIN_WATCHLIST_WIDTH, Math.min(watchlistWidthRef.current, maxWidth));
+      if (nextWidth !== watchlistWidthRef.current) {
+        setWatchlistWidth(nextWidth);
+        watchlistWidthRef.current = nextWidth;
+      }
+    };
+    const id = window.setTimeout(clampWidth, 0);
+    window.addEventListener("resize", clampWidth);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("resize", clampWidth);
+    };
+  }, []);
+
+  useEffect(() => {
+    const clampListHeight = () => {
+      const maxHeight = getWatchlistListMaxHeight();
+      const nextHeight = Math.max(
+        MIN_WATCHLIST_LIST_HEIGHT,
+        Math.min(watchlistListHeightRef.current, maxHeight)
+      );
+      if (nextHeight !== watchlistListHeightRef.current) {
+        setWatchlistListHeight(nextHeight);
+        watchlistListHeightRef.current = nextHeight;
+      }
+    };
+    const id = window.setTimeout(clampListHeight, 0);
+    window.addEventListener("resize", clampListHeight);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("resize", clampListHeight);
+    };
+  }, [getWatchlistListMaxHeight]);
+
+  useEffect(() => {
     if (!chartMenu.open) return;
     const close = () => setChartMenu((prev) => ({ ...prev, open: false }));
     const onKeyDown = (event: KeyboardEvent) => {
@@ -488,13 +533,6 @@ export default function Home() {
   }, [extEnabled]);
 
   useEffect(() => {
-    if (isEmbedMode) {
-      if (forcedEmbedSymbol) {
-        setWatchlist([forcedEmbedSymbol]);
-        setSelected(forcedEmbedSymbol);
-      }
-      return;
-    }
     const storedToken = window.localStorage.getItem(AUTH_TOKEN_KEY);
     if (storedToken && storedToken.trim().length) {
       setAuthToken(storedToken.trim());
@@ -523,16 +561,9 @@ export default function Home() {
         // Ignore invalid localStorage data.
       }
     }
-  }, [isEmbedMode, forcedEmbedSymbol]);
+  }, []);
 
   useEffect(() => {
-    if (isEmbedMode) {
-      setSessionAuthorized(true);
-      setAuthChecked(true);
-      setSyncState("local");
-      setShowLogin(false);
-      return;
-    }
     let cancelled = false;
     const run = async () => {
       try {
@@ -574,18 +605,10 @@ export default function Home() {
           .map((item: unknown) => String(item || "").toUpperCase().trim())
           .filter(Boolean)
           .slice(-MAX_WATCHLIST);
-        const serverSelected = typeof json.selected_symbol === "string" ? json.selected_symbol : "";
-        if (initialUrlSymbol) {
-          // URL symbol takes precedence over synced watchlist selection.
-          const merged = [initialUrlSymbol, ...normalized.filter((item: string) => item !== initialUrlSymbol)].slice(
-            0,
-            MAX_WATCHLIST
-          );
-          setWatchlist(merged);
-          setSelected(initialUrlSymbol);
-        } else if (normalized.length) {
+        if (normalized.length) {
           setWatchlist(normalized);
-          setSelected(serverSelected && normalized.includes(serverSelected) ? serverSelected : normalized[0]);
+          const sel = typeof json.selected_symbol === "string" ? json.selected_symbol : "";
+          setSelected(sel && normalized.includes(sel) ? sel : normalized[0]);
         }
         serverHydratedRef.current = true;
         setShowLogin(false);
@@ -603,7 +626,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase, authToken, isEmbedMode, initialUrlSymbol]);
+  }, [apiBase, authToken]);
 
   useEffect(() => {
     const override = window.sessionStorage.getItem("fv_ext_override");
@@ -628,20 +651,12 @@ export default function Home() {
     if (symbolParam) {
       const normalized = normalizeSymbol(symbolParam);
       if (normalized) {
-        if (isEmbedMode) {
-          setSelected(normalized);
-          setWatchlist([normalized]);
-        } else {
-          setSelected(normalized);
-          setWatchlist((prev) => {
-            if (prev.includes(normalized)) return prev;
-            return [normalized, ...prev].slice(0, MAX_WATCHLIST);
-          });
-        }
+        setSelected(normalized);
+        setWatchlist((prev) => {
+          if (prev.includes(normalized)) return prev;
+          return [normalized, ...prev].slice(0, MAX_WATCHLIST);
+        });
       }
-    } else if (isEmbedMode && forcedEmbedSymbol) {
-      setSelected(forcedEmbedSymbol);
-      setWatchlist([forcedEmbedSymbol]);
     }
 
     if (tfParam) {
@@ -658,18 +673,7 @@ export default function Home() {
     }
 
     urlStateReadyRef.current = true;
-  }, [isEmbedMode, forcedEmbedSymbol]);
-
-  useEffect(() => {
-    if (!isEmbedMode || !forcedEmbedSymbol) return;
-    if (selected !== forcedEmbedSymbol) {
-      setSelected(forcedEmbedSymbol);
-    }
-    setWatchlist((prev) => {
-      if (prev.length === 1 && prev[0] === forcedEmbedSymbol) return prev;
-      return [forcedEmbedSymbol];
-    });
-  }, [isEmbedMode, forcedEmbedSymbol, selected]);
+  }, []);
 
   useEffect(() => {
     const storedIndicators = window.localStorage.getItem("fv_indicators");
@@ -691,18 +695,15 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (isEmbedMode) return;
     window.localStorage.setItem("fv_watchlist", JSON.stringify(watchlist));
-  }, [watchlist, isEmbedMode]);
+  }, [watchlist]);
 
   useEffect(() => {
-    if (isEmbedMode) return;
     if (!selected) return;
     window.localStorage.setItem("fv_selected", selected);
-  }, [selected, isEmbedMode]);
+  }, [selected]);
 
   useEffect(() => {
-    if (isEmbedMode) return;
     if (!authToken && !sessionAuthorized) return;
     if (serverSaveTimerRef.current) {
       window.clearTimeout(serverSaveTimerRef.current);
@@ -738,7 +739,7 @@ export default function Home() {
     return () => {
       if (serverSaveTimerRef.current) window.clearTimeout(serverSaveTimerRef.current);
     };
-  }, [apiBase, authToken, sessionAuthorized, watchlistKey, selected, isEmbedMode]);
+  }, [apiBase, authToken, sessionAuthorized, watchlistKey, selected]);
 
   useEffect(() => {
     if (!urlStateReadyRef.current || !selected) return;
@@ -788,7 +789,7 @@ export default function Home() {
     const controller = new AbortController();
     const fetchNews = async () => {
       try {
-        const url = `${apiBase}/api/news?symbol=${encodeURIComponent(selected)}&limit=10`;
+        const url = `${apiBase}/api/news?symbol=${encodeURIComponent(selected)}&limit=3`;
         const headers: Record<string, string> = {};
         if (authToken) {
           headers.authorization = `Bearer ${authToken}`;
@@ -955,12 +956,10 @@ export default function Home() {
     });
 
     chart.priceScale("").applyOptions({
-      // Keep volume histogram compact at the bottom.
-      scaleMargins: { top: isEmbedMode ? 0.88 : 0.8, bottom: 0 },
+      scaleMargins: { top: 0.8, bottom: 0 },
     });
     chart.priceScale("right").applyOptions({
-      // Tighter margins prevent large dead space above candles in embed mode.
-      scaleMargins: isEmbedMode ? { top: 0.02, bottom: 0.08 } : { top: 0.06, bottom: 0.14 },
+      scaleMargins: { top: 0.1, bottom: 0.2 },
     });
 
     chartApiRef.current = chart;
@@ -1067,22 +1066,21 @@ export default function Home() {
     const handleResize = () => {
       if (!chartRef.current) return;
       if (resizeTimerRef.current) {
-        window.clearTimeout(resizeTimerRef.current);
+        window.cancelAnimationFrame(resizeTimerRef.current);
       }
-      resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = window.requestAnimationFrame(() => {
+        resizeTimerRef.current = null;
         if (!chartRef.current) return;
         const rect = chartRef.current.getBoundingClientRect();
         const width = Math.round(rect.width);
         const height = Math.round(rect.height);
         if (width < 10 || height < 10) {
-          resizeTimerRef.current = null;
           return;
         }
         if (
           lastSizeRef.current.width === width &&
           lastSizeRef.current.height === height
         ) {
-          resizeTimerRef.current = null;
           return;
         }
         lastSizeRef.current = { width, height };
@@ -1096,8 +1094,7 @@ export default function Home() {
             });
           }
         }
-        resizeTimerRef.current = null;
-      }, 100);
+      });
     };
     const resizeObserver = new ResizeObserver(() => handleResize());
     resizeObserver.observe(chartRef.current);
@@ -1112,7 +1109,7 @@ export default function Home() {
       window.cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       if (resizeTimerRef.current) {
-        window.clearTimeout(resizeTimerRef.current);
+        window.cancelAnimationFrame(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
       if (syncRange) {
@@ -1281,7 +1278,7 @@ export default function Home() {
     const fetchQuotes = async () => {
       try {
         const res = await fetch(
-          `${apiBase}/api/quotes?symbols=${encodeURIComponent(symbols)}&ext=${extEnabled ? "1" : "0"}`,
+          `${apiBase}/api/quotes?symbols=${encodeURIComponent(symbols)}&ext=1`,
           { signal: controller.signal }
         );
         if (res.status === 401) {
@@ -1332,7 +1329,7 @@ export default function Home() {
       eventSource = new EventSource(
         `${apiBase}/api/stream/quotes?symbols=${encodeURIComponent(
           symbols
-        )}&ext=${extEnabled ? "1" : "0"}`
+        )}&ext=1`
       );
       eventSource.onmessage = (event) => {
         if (!active) return;
@@ -1398,6 +1395,12 @@ export default function Home() {
     });
   }, []);
 
+  const formatExchangeLabel = useCallback((value?: string) => {
+    const next = (value || "").trim().toUpperCase();
+    if (!next) return "—";
+    return EXCHANGE_LABEL_MAP[next] || next;
+  }, []);
+
   const formatSigned = useCallback((value?: number, suffix = "") => {
     if (value === undefined || Number.isNaN(value)) return "--";
     const sign = value > 0 ? "+" : value < 0 ? "" : "";
@@ -1438,6 +1441,234 @@ export default function Home() {
     }
     return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
   }, []);
+
+  const applyWatchlistResize = useCallback((clientX: number) => {
+    const state = watchlistResizeStateRef.current;
+    if (!state.active) return;
+    const delta = clientX - state.startX;
+    const nextWidth = Math.max(
+      state.minWidth,
+      Math.min(state.maxWidth, Math.round(state.startWidth - delta))
+    );
+    if (nextWidth === watchlistWidthRef.current) return;
+    watchlistWidthRef.current = nextWidth;
+    if (watchlistResizeFrameRef.current != null) return;
+    watchlistResizeFrameRef.current = window.requestAnimationFrame(() => {
+      watchlistResizeFrameRef.current = null;
+      if (watchlistSectionRef.current) {
+        watchlistSectionRef.current.style.width = `${watchlistWidthRef.current}px`;
+      }
+    });
+  }, []);
+
+  const onWatchlistPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      applyWatchlistResize(event.clientX);
+    },
+    [applyWatchlistResize]
+  );
+
+  const stopWatchlistResize = useCallback(() => {
+    const state = watchlistResizeStateRef.current;
+    if (!state.active) return;
+    state.active = false;
+    state.pointerId = -1;
+    setIsResizingWatchlist(false);
+    if (watchlistResizeFrameRef.current != null) {
+      window.cancelAnimationFrame(watchlistResizeFrameRef.current);
+      watchlistResizeFrameRef.current = null;
+    }
+    if (watchlistSectionRef.current) {
+      watchlistSectionRef.current.style.width = `${watchlistWidthRef.current}px`;
+    }
+    setWatchlistWidth(watchlistWidthRef.current);
+    document.body.style.removeProperty("user-select");
+    document.body.style.removeProperty("cursor");
+  }, []);
+
+  const startWatchlistResize = useCallback(
+    (clientX: number, pointerId: number) => {
+      const container = mainContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const maxWidth = Math.max(
+        MIN_WATCHLIST_WIDTH,
+        Math.floor(rect.width - MIN_CHART_WIDTH)
+      );
+      const startWidth = Math.max(
+        MIN_WATCHLIST_WIDTH,
+        Math.min(watchlistWidthRef.current, maxWidth)
+      );
+      watchlistResizeStateRef.current = {
+        active: true,
+        startX: clientX,
+        pointerId,
+        startWidth,
+        minWidth: MIN_WATCHLIST_WIDTH,
+        maxWidth,
+      };
+      setWatchlistWidth(startWidth);
+      watchlistWidthRef.current = startWidth;
+      setIsResizingWatchlist(true);
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+    },
+    []
+  );
+
+  const onWatchlistPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      startWatchlistResize(event.clientX, event.pointerId);
+    },
+    [startWatchlistResize]
+  );
+
+  const onWatchlistPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      stopWatchlistResize();
+    },
+    [stopWatchlistResize]
+  );
+
+  const onWatchlistPointerCancel = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      stopWatchlistResize();
+    },
+    [stopWatchlistResize]
+  );
+
+  const applyWatchlistListResize = useCallback((clientY: number) => {
+    const state = watchlistListResizeStateRef.current;
+    if (!state.active) return;
+    const delta = clientY - state.startY;
+    const nextHeight = Math.max(
+      state.minHeight,
+      Math.min(state.maxHeight, Math.round(state.startHeight + delta))
+    );
+    if (nextHeight === watchlistListHeightRef.current) return;
+    watchlistListHeightRef.current = nextHeight;
+    if (watchlistListResizeFrameRef.current != null) return;
+    watchlistListResizeFrameRef.current = window.requestAnimationFrame(() => {
+      watchlistListResizeFrameRef.current = null;
+      if (watchlistItemsRef.current) {
+        watchlistItemsRef.current.style.height = `${watchlistListHeightRef.current}px`;
+      }
+    });
+  }, []);
+
+  const onWatchlistListPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistListResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      applyWatchlistListResize(event.clientY);
+    },
+    [applyWatchlistListResize]
+  );
+
+  const stopWatchlistListResize = useCallback(() => {
+    const state = watchlistListResizeStateRef.current;
+    if (!state.active) return;
+    state.active = false;
+    state.pointerId = -1;
+    setIsResizingWatchlistList(false);
+    if (watchlistListResizeFrameRef.current != null) {
+      window.cancelAnimationFrame(watchlistListResizeFrameRef.current);
+      watchlistListResizeFrameRef.current = null;
+    }
+    if (watchlistItemsRef.current) {
+      watchlistItemsRef.current.style.height = `${watchlistListHeightRef.current}px`;
+    }
+    setWatchlistListHeight(watchlistListHeightRef.current);
+    document.body.style.removeProperty("user-select");
+    document.body.style.removeProperty("cursor");
+  }, []);
+
+  const startWatchlistListResize = useCallback(
+    (clientY: number, pointerId: number) => {
+      const section = watchlistSectionRef.current;
+      if (!section) return;
+      const maxHeight = getWatchlistListMaxHeight();
+      const startHeight = Math.max(
+        MIN_WATCHLIST_LIST_HEIGHT,
+        Math.min(watchlistListHeightRef.current, maxHeight)
+      );
+      watchlistListResizeStateRef.current = {
+        active: true,
+        startY: clientY,
+        pointerId,
+        startHeight,
+        minHeight: MIN_WATCHLIST_LIST_HEIGHT,
+        maxHeight,
+      };
+      setWatchlistListHeight(startHeight);
+      watchlistListHeightRef.current = startHeight;
+      setIsResizingWatchlistList(true);
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "row-resize";
+    },
+    [getWatchlistListMaxHeight]
+  );
+
+  const onWatchlistListPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      startWatchlistListResize(event.clientY, event.pointerId);
+    },
+    [startWatchlistListResize]
+  );
+
+  const onWatchlistListPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistListResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      stopWatchlistListResize();
+    },
+    [stopWatchlistListResize]
+  );
+
+  const onWatchlistListPointerCancel = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const state = watchlistListResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      stopWatchlistListResize();
+    },
+    [stopWatchlistListResize]
+  );
+
+  useEffect(() => () => {
+    stopWatchlistResize();
+  }, [stopWatchlistResize]);
+
+  useEffect(() => () => {
+    stopWatchlistListResize();
+  }, [stopWatchlistListResize]);
 
   const getLatestIndicatorValue = useCallback((points: LinePoint[]) => {
     for (let i = points.length - 1; i >= 0; i -= 1) {
@@ -1569,121 +1800,6 @@ export default function Home() {
     return `Next ${formatCountdown(remaining)}`;
   }, [chartLastTs, clockTs, formatCountdown, timeframe]);
 
-  const watchlistLastQuoteTs = useMemo(() => {
-    let latest = 0;
-    for (const symbol of watchlist) {
-      const ts = quotes[symbol]?.lastTs;
-      if (typeof ts === "number" && ts > latest) latest = ts;
-    }
-    return latest;
-  }, [quotes, watchlist]);
-
-  const watchlistFreshnessLabel = useMemo(() => {
-    if (!watchlistLastQuoteTs) return "Upd --";
-    const age = Math.max(0, Math.floor(clockTs / 1000 - watchlistLastQuoteTs));
-    return `Upd ${formatAgeShort(age)} ago`;
-  }, [clockTs, formatAgeShort, watchlistLastQuoteTs]);
-
-
-  useEffect(() => {
-    watchlistLayoutRef.current = watchlistLayout;
-  }, [watchlistLayout]);
-
-  const startWatchlistResize = useCallback((handle: "items" | "selected") => {
-    activeWatchlistHandleRef.current = handle;
-  }, []);
-
-  const stopWatchlistResize = useCallback(() => {
-    activeWatchlistHandleRef.current = null;
-  }, []);
-
-  const applyWatchlistResize = useCallback((clientY: number) => {
-    if (!activeWatchlistHandleRef.current) return;
-
-    const section = watchlistSectionRef.current;
-    if (!section) return;
-
-    const rect = section.getBoundingClientRect();
-    if (!rect.height) return;
-
-    const pointerPercent = ((clientY - rect.top) / rect.height) * 100;
-    const current = watchlistLayoutRef.current;
-
-    if (activeWatchlistHandleRef.current === "items") {
-      const nextItems = clampPercent(
-        pointerPercent,
-        WATCHLIST_LAYOUT_MIN_ITEMS,
-        100 - WATCHLIST_LAYOUT_MIN_SELECTED - WATCHLIST_LAYOUT_MIN_NEWS
-      );
-      const nextSelected = clampPercent(
-        100 - nextItems - current.news,
-        WATCHLIST_LAYOUT_MIN_SELECTED,
-        100 - nextItems - WATCHLIST_LAYOUT_MIN_NEWS
-      );
-      const nextNews = 100 - nextItems - nextSelected;
-      if (
-        current.items !== nextItems ||
-        current.selected !== nextSelected ||
-        current.news !== nextNews
-      ) {
-        setWatchlistLayout({ items: nextItems, selected: nextSelected, news: nextNews });
-      }
-      return;
-    }
-
-    const nextSelected = clampPercent(
-      pointerPercent - current.items,
-      WATCHLIST_LAYOUT_MIN_SELECTED,
-      100 - current.items - WATCHLIST_LAYOUT_MIN_NEWS
-    );
-    const nextNews = 100 - current.items - nextSelected;
-
-    if (
-      current.selected !== nextSelected ||
-      current.news !== nextNews
-    ) {
-      setWatchlistLayout({
-        items: current.items,
-        selected: nextSelected,
-        news: nextNews,
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    const onMouseMove = (ev: globalThis.MouseEvent) => {
-      if (!activeWatchlistHandleRef.current) return;
-      applyWatchlistResize(ev.clientY);
-    };
-
-    const onTouchMove = (ev: globalThis.TouchEvent) => {
-      const touch = ev.touches[0];
-      if (!touch || !activeWatchlistHandleRef.current) return;
-      applyWatchlistResize(touch.clientY);
-    };
-
-    const onMouseUp = () => {
-      stopWatchlistResize();
-    };
-
-    const onTouchEnd = () => {
-      stopWatchlistResize();
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-    window.addEventListener("touchmove", onTouchMove, { passive: false });
-    window.addEventListener("touchend", onTouchEnd);
-
-    return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-      window.removeEventListener("touchmove", onTouchMove);
-      window.removeEventListener("touchend", onTouchEnd);
-    };
-  }, [applyWatchlistResize, stopWatchlistResize]);
-
-
   useEffect(() => {
     const controller = new AbortController();
     const requestKey = `${selected}|${timeframe}|${extEnabled ? "1" : "0"}`;
@@ -1716,13 +1832,7 @@ export default function Home() {
         );
         if (!res.ok) {
           if (res.status === 401) {
-            window.localStorage.removeItem(AUTH_TOKEN_KEY);
-            setAuthToken("");
-            setSyncState("local");
-            setSessionAuthorized(false);
-            setAuthChecked(true);
-            setShowLogin(true);
-            throw new Error("Sign in required to load chart data.");
+            throw new Error("Chart feed requires sign-in.");
           }
           throw new Error(`No data for ${selected}`);
         }
@@ -1866,7 +1976,7 @@ export default function Home() {
     return () => {
       controller.abort();
     };
-  }, [apiBase, selected, timeframe, extEnabled, authToken, accessLocked]);
+  }, [apiBase, selected, timeframe, extEnabled, authToken]);
 
   useEffect(() => {
     if (accessLocked) return;
@@ -1883,10 +1993,6 @@ export default function Home() {
   }, [apiBase, selected, watchlist, watchlistKey, timeframe, extEnabled, accessLocked]);
 
   useEffect(() => {
-    if (accessLocked) {
-      setStreamMode("polling");
-      return;
-    }
     if (!selected) return;
     const pollMsByTf: Record<string, number> = {
       "1m": 3000,
@@ -1904,6 +2010,10 @@ export default function Home() {
     let pollId: number | null = null;
     let source: EventSource | null = null;
     let reconnectId: number | null = null;
+    let streamWatchdogId: number | null = null;
+    let lastStreamActivityTs = Date.now();
+    let pollNoDataCount = 0;
+    const streamWatchdogMs = 45000;
 
     const applyDelta = (json: DeltaPayload) => {
       const incomingCandles = sanitizeCandles(
@@ -1993,6 +2103,9 @@ export default function Home() {
         incomingIndicators.ema26.length > 0 ||
         incomingIndicators.rsi14.length > 0 ||
         incomingIndicators.vwap.length > 0;
+      if (hasAny) {
+        lastStreamActivityTs = Date.now();
+      }
       if (!hasAny) return;
       setError(null);
       if (incomingCandles.length) {
@@ -2034,7 +2147,6 @@ export default function Home() {
         ? Number(extCandlesRef.current[extCandlesRef.current.length - 1].time)
         : 0;
       const since = Math.max(lastMain, lastExt);
-      if (!since) return;
       inflight = true;
       try {
         const res = await fetch(
@@ -2045,18 +2157,25 @@ export default function Home() {
           }&since=${since}`
         );
         if (res.status === 401) {
-          window.localStorage.removeItem(AUTH_TOKEN_KEY);
-          setAuthToken("");
-          setSyncState("local");
-          setSessionAuthorized(false);
-          setAuthChecked(true);
-          setShowLogin(true);
+          setError("Chart feed requires sign-in.");
           return;
         }
         if (!res.ok) return;
         const json = await res.json();
         applyDelta(json);
-        setStreamMode((prev) => (prev === "reconnecting" ? "polling" : prev));
+        if (
+          (json?.candles && json.candles.length > 0) ||
+          (json?.ext_candles && json.ext_candles.length > 0) ||
+          (json?.volume && json.volume.length > 0)
+        ) {
+          pollNoDataCount = 0;
+          setStreamMode((prev) => (prev === "reconnecting" ? "polling" : prev));
+        } else {
+          pollNoDataCount += 1;
+          if (pollNoDataCount >= 8) {
+            setStreamMode((prev) => (prev === "stream" ? "polling" : prev));
+          }
+        }
       } catch {
         // Silent fallback.
       } finally {
@@ -2067,6 +2186,7 @@ export default function Home() {
     const startPolling = () => {
       if (pollId) return;
       setStreamMode("polling");
+      runDeltaFetch();
       pollId = window.setInterval(runDeltaFetch, pollMs);
     };
 
@@ -2082,6 +2202,28 @@ export default function Home() {
         window.clearInterval(reconnectId);
         reconnectId = null;
       }
+    };
+
+    const clearWatchdog = () => {
+      if (streamWatchdogId) {
+        window.clearInterval(streamWatchdogId);
+        streamWatchdogId = null;
+      }
+    };
+
+    const setWatchdog = () => {
+      clearWatchdog();
+      streamWatchdogId = window.setInterval(() => {
+        if (!alive || !source || document.hidden) return;
+        if (Date.now() - lastStreamActivityTs < streamWatchdogMs) return;
+        if (source) {
+          source.close();
+          source = null;
+        }
+        setStreamMode("reconnecting");
+        startPolling();
+        scheduleReconnect();
+      }, 10000);
     };
 
     const scheduleReconnect = () => {
@@ -2114,6 +2256,8 @@ export default function Home() {
       );
       source.onopen = () => {
         setStreamMode("stream");
+        pollNoDataCount = 0;
+        lastStreamActivityTs = Date.now();
         stopPolling();
         clearReconnect();
       };
@@ -2121,6 +2265,7 @@ export default function Home() {
         if (!alive) return;
         try {
           const json = JSON.parse(event.data);
+          lastStreamActivityTs = Date.now();
           applyDelta(json);
         } catch {
           // Ignore malformed stream payload.
@@ -2135,13 +2280,16 @@ export default function Home() {
         startPolling();
         scheduleReconnect();
       };
+      setWatchdog();
     };
 
     setStreamMode("stream");
     connectStream();
     const visibilityHandler = () => {
       if (!document.hidden) {
+        lastStreamActivityTs = Date.now();
         runDeltaFetch();
+        setWatchdog();
       }
     };
     document.addEventListener("visibilitychange", visibilityHandler);
@@ -2150,13 +2298,14 @@ export default function Home() {
       alive = false;
       document.removeEventListener("visibilitychange", visibilityHandler);
       stopPolling();
+      clearWatchdog();
       clearReconnect();
       if (source) {
         source.close();
         source = null;
       }
     };
-  }, [apiBase, selected, timeframe, extEnabled, accessLocked]);
+  }, [apiBase, selected, timeframe, extEnabled]);
 
   const renderSparkline = (values: number[] | undefined, color: string) => {
     if (!values || values.length < 2) {
@@ -2221,6 +2370,8 @@ export default function Home() {
     setShowIndicatorPanel(false);
     setChartMenu((prev) => ({ ...prev, open: false }));
   }, []);
+  const headerExchangeLabel = formatExchangeLabel(headerExchange);
+  const selectedExchangeLabel = formatExchangeLabel(selectedQuote?.exchange);
 
   const handleChartsLogin = useCallback(async () => {
     setLoginError(null);
@@ -2305,7 +2456,7 @@ export default function Home() {
               <div className="tv-ticker">{selected || "--"}</div>
               <div className="tv-name-row">
                 <span className="tv-name">{headerName || "—"}</span>
-                {headerExchange !== "—" && <span className="tv-exchange">{headerExchange}</span>}
+                {headerExchange && <span className="tv-exchange">{headerExchangeLabel}</span>}
                 {headerSession && headerSession !== "rth" && (
                   <span className="session-badge">{headerSession.toUpperCase()}</span>
                 )}
@@ -2326,7 +2477,10 @@ export default function Home() {
               >
                 {headerChange != null ? formatSigned(headerChange, "%") : "--"}
               </div>
-</div>
+              <div className="tv-countdown" title="Time until next candle boundary.">
+                {candleCountdownLabel}
+              </div>
+            </div>
           </div>
         </div>
         <div className="tv-center">
@@ -2341,22 +2495,40 @@ export default function Home() {
           ))}
         </div>
         <div className="tv-right">
-          {!isEmbedMode && (
-            <nav className="tv-app-nav" aria-label="Whomp sections">
-              <a className="tv-app-link" href="https://whomp.ai/alphaai">
-                Alpha AI
-              </a>
-              <a className="tv-app-link" href="https://whomp.ai/flow-tape">
-                Flow Tape
-              </a>
-              <a className="tv-app-link" href="https://whomp.ai/news">
-                The Wire
-              </a>
-              <a className="tv-app-link" href="https://whomp.ai/ticker/NVDA">
-                Ticker Intel
-              </a>
-            </nav>
-          )}
+          <nav className="tv-app-nav" aria-label="Whomp sections">
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/alphaai"
+              target="_top"
+              rel="noreferrer"
+            >
+              Alpha AI
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/flow-tape"
+              target="_top"
+              rel="noreferrer"
+            >
+              Flow Tape
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/news"
+              target="_top"
+              rel="noreferrer"
+            >
+              The Wire
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/ticker/NVDA"
+              target="_top"
+              rel="noreferrer"
+            >
+              Ticker Intel
+            </a>
+          </nav>
           <div className="tv-actions">
             <div className="indicator-control">
               <button
@@ -2528,7 +2700,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className={`main-container${isEmbedMode ? " embed-mode" : ""}${isCanvasOnly ? " embed-canvas" : ""}`}>
+      <div className="main-container" ref={mainContainerRef}>
         <div className="chart-section">
           <div className="chart-header">
             <div className="chart-ohlc">
@@ -2543,13 +2715,8 @@ export default function Home() {
                   </span>
                 </>
               ) : (
-                <>
-                  <span>Loading OHLC...</span>
-                </>
+                <span>Loading OHLC...</span>
               )}
-              <span className="chart-countdown tv-countdown" title="Time until next candle boundary.">
-                {candleCountdownLabel}
-              </span>
             </div>
             <div className="chart-meta">
               <div className="chart-status">
@@ -2631,25 +2798,24 @@ export default function Home() {
           </div>
         </div>
 
-        {!isEmbedMode && <aside className="watchlist-section" ref={watchlistSectionRef}>
+        <div
+          className={`watchlist-resize-handle ${isResizingWatchlist ? "is-dragging" : ""}`}
+          role="separator"
+          aria-label="Resize watchlist panel"
+          aria-orientation="vertical"
+          onPointerDown={onWatchlistPointerDown}
+          onPointerMove={onWatchlistPointerMove}
+          onPointerUp={onWatchlistPointerUp}
+          onPointerCancel={onWatchlistPointerCancel}
+        />
+
+        <aside
+          className="watchlist-section"
+          ref={watchlistSectionRef}
+          style={{ width: `${watchlistWidthRef.current}px` }}
+        >
           <div className="watchlist-header">
-            <span className="watchlist-title">Watchlist</span>
-            <div className="watchlist-meta">
-              <span
-                className={"chart-chip watchlist-state " + (quotesStale ? "is-stale" : "is-live")}
-                title={
-                  quotesStale
-                    ? "Using cached quotes due to upstream delay/error."
-                    : "Receiving delayed stream updates."
-                }
-              >
-                {quotesStale ? "Stale" : "Live"}
-              </span>
-              <span className={"chart-chip watch-sync " + "watch-sync-" + syncState} title="Watchlist sync status">
-                {syncState === "synced" ? "Synced" : syncState === "syncing" ? "Syncing" : syncState === "error" ? "Sync error" : "Local"}
-              </span>
-              <span className="chart-chip watchlist-count">{watchlist.length} Active</span>
-            </div>
+            <span>Watchlist</span>
           </div>
           <div className="watchlist-controls">
             <input
@@ -2694,14 +2860,17 @@ export default function Home() {
                     <div className="search-name">{item.name}</div>
                   </div>
                   <div className="search-meta">
-                    {[formatExchangeLabel(item.exchange, item.symbol), item.type].filter(Boolean).join(" · ")}
+                    {[item.exchange, item.type].filter(Boolean).join(" · ")}
                   </div>
                 </button>
               ))}
             </div>
           )}
-          <div className="watchlist-body">
-            <div className="watchlist-items" style={{ flex: "0 0 " + watchlistLayout.items + "%" }}>
+          <div
+            className="watchlist-items"
+            ref={watchlistItemsRef}
+            style={{ height: `${watchlistListHeightRef.current}px` }}
+          >
             {watchlist.map((symbol) => {
               const quote = quotes[symbol];
               const changeClass =
@@ -2729,7 +2898,7 @@ export default function Home() {
                     <div className="sym-info">
                       <div className="sym-symbol">{symbol}</div>
                       <div className="sym-name">
-                        {formatExchangeLabel(quote?.exchange, symbol)}
+                        {quote ? formatExchangeLabel(quote.exchange) : "—"}
                       </div>
                     </div>
                   </div>
@@ -2754,8 +2923,20 @@ export default function Home() {
               );
             })}
           </div>
-          <div className="watchlist-split-handle" role="separator" aria-orientation="horizontal" aria-label="Resize watchlist list and selected section" onMouseDown={(event) => { event.preventDefault(); startWatchlistResize("items"); }} onTouchStart={(event) => { event.preventDefault(); startWatchlistResize("items"); }} />
-            <div className="watchlist-detail" style={{ flex: "0 0 " + watchlistLayout.selected + "%" }}>
+          <div
+            className={`watchlist-vsplit-handle ${
+              isResizingWatchlistList ? "is-dragging" : ""
+            }`}
+            ref={watchlistVsplitRef}
+            role="separator"
+            aria-label="Resize watchlist rows and details"
+            aria-orientation="horizontal"
+            onPointerDown={onWatchlistListPointerDown}
+            onPointerMove={onWatchlistListPointerMove}
+            onPointerUp={onWatchlistListPointerUp}
+            onPointerCancel={onWatchlistListPointerCancel}
+          />
+          <div className="watchlist-detail" ref={watchlistDetailRef}>
             <div className="detail-head">
               <div>
                 <div className="detail-label">Selected</div>
@@ -2824,7 +3005,7 @@ export default function Home() {
               )}
             </div>
             <div className="detail-exchange">
-              {formatExchangeLabel(quotes[selected]?.exchange, selected)}
+              {selectedExchangeLabel}
             </div>
             {selectedQuote?.lastTs && (
               <div className="detail-updated">
@@ -2838,34 +3019,34 @@ export default function Home() {
               </div>
             )}
           </div>
-          <div className="watchlist-split-handle" role="separator" aria-orientation="horizontal" aria-label="Resize selected and news section" onMouseDown={(event) => { event.preventDefault(); startWatchlistResize("selected"); }} onTouchStart={(event) => { event.preventDefault(); startWatchlistResize("selected"); }} />
-            <div className="watchlist-news" style={{ flex: "0 0 " + watchlistLayout.news + "%" }}>
+          <div className="watchlist-news" ref={watchlistNewsRef}>
             <div className="detail-label">News</div>
-            {newsError && (
-              <div className="news-empty">{newsError}</div>
-            )}
-            {!newsError && newsItems.length === 0 && (
-              <div className="news-empty">No headlines yet.</div>
-            )}
-            {!newsError &&
-              newsItems.map((item, idx) => (
-                <a
-                  key={`${item.title}-${idx}`}
-                  className="news-item"
-                  href={item.url || "#"}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <div className="news-title">{item.title}</div>
-                  <div className="news-meta">
-                    {item.source || "—"}
-                    {item.time ? ` · ${formatNewsTimestamp(item.time)}` : ""}
-                  </div>
-                </a>
-              ))}
+            <div className="watchlist-news-scroll">
+              {newsError && (
+                <div className="news-empty">{newsError}</div>
+              )}
+              {!newsError && newsItems.length === 0 && (
+                <div className="news-empty">No headlines yet.</div>
+              )}
+              {!newsError &&
+                newsItems.map((item, idx) => (
+                  <a
+                    key={`${item.title}-${idx}`}
+                    className="news-item"
+                    href={item.url || "#"}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <div className="news-title">{item.title}</div>
+                    <div className="news-meta">
+                      {item.source || "—"}
+                      {item.time ? ` · ${formatNewsTimestamp(item.time)}` : ""}
+                    </div>
+                  </a>
+                ))}
             </div>
           </div>
-        </aside>}
+        </aside>
 
         {accessLocked && (
           <div className="charts-lock-overlay">
@@ -2882,7 +3063,7 @@ export default function Home() {
           </div>
         )}
 
-        {!isEmbedMode && showLogin && (
+        {showLogin && (
           <div className="charts-login-backdrop" onMouseDown={() => setShowLogin(false)}>
             <div className="charts-login-modal" onMouseDown={(e) => e.stopPropagation()}>
               <div className="charts-login-title">Sync Watchlist</div>
