@@ -200,7 +200,7 @@ const MIN_CHART_WIDTH = 460;
 const WATCHLIST_HANDLE_WIDTH = 14;
 const DEFAULT_WATCHLIST_LIST_HEIGHT = 210;
 const MIN_WATCHLIST_LIST_HEIGHT = 120;
-const MIN_WATCHLIST_DETAIL_HEIGHT = 220;
+const MIN_WATCHLIST_DETAIL_HEIGHT = 170;
 const MIN_WATCHLIST_NEWS_HEIGHT = 100;
 const AUTH_TOKEN_KEY = "fv_auth_token";
 const TIMEFRAME_SECONDS: Record<string, number> = {
@@ -380,7 +380,13 @@ export default function Home() {
     selectedQuote.session !== "rth" &&
     detailExtPrice != null;
   const extDetailLabel =
-    selectedQuote?.session === "pre" ? "Pre" : "Post";
+    selectedQuote?.session === "pre" ? "Pre-Market" : "After Hours";
+  const detailSessionLabel =
+    selectedQuote?.session === "pre"
+      ? "Pre-Market"
+      : selectedQuote?.session === "post"
+      ? "After Hours"
+      : null;
   const watchlistKey = useMemo(() => watchlist.join(","), [watchlist]);
   const accessLocked = authChecked && !sessionAuthorized;
 
@@ -2507,7 +2513,6 @@ export default function Home() {
     setChartMenu((prev) => ({ ...prev, open: false }));
   }, []);
   const headerExchangeLabel = formatExchangeLabel(headerExchange);
-  const selectedExchangeLabel = formatExchangeLabel(selectedQuote?.exchange);
 
   const handleChartsLogin = useCallback(async () => {
     setLoginError(null);
@@ -3074,17 +3079,14 @@ export default function Home() {
           />
           <div className="watchlist-detail" ref={watchlistDetailRef}>
             <div className="detail-head">
-              <div>
-                <div className="detail-label">Selected</div>
-                <div className="detail-symbol">{selected || "--"}</div>
-              </div>
-              {selectedQuote?.session && selectedQuote.session !== "rth" && (
-                <div className="detail-session">{selectedQuote.session.toUpperCase()}</div>
+              <div className="detail-symbol">{selected || "--"}</div>
+              {detailSessionLabel && (
+                <div className="detail-session">{detailSessionLabel}</div>
               )}
             </div>
             <div className="detail-rows">
               <div className="detail-row">
-                <div className="detail-row-label">RTH</div>
+                <div className="detail-row-label">Market</div>
                 <div
                   className={`detail-row-price ${
                     detailRthChange != null && detailRthChange !== 0
@@ -3139,9 +3141,6 @@ export default function Home() {
                   </div>
                 </div>
               )}
-            </div>
-            <div className="detail-exchange">
-              {selectedExchangeLabel}
             </div>
             {selectedQuote?.lastTs && (
               <div className="detail-updated">
