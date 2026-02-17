@@ -2636,7 +2636,7 @@ export default function Home() {
           <div className="tv-actions">
             <div className="indicator-control">
               <button
-                className={`ind-panel-btn ${showIndicatorPanel ? "active" : ""}`}
+                className={`ind-panel-btn toolbar-btn ${showIndicatorPanel ? "active" : ""}`}
                 onClick={() => setShowIndicatorPanel((prev) => !prev)}
                 title="Overlays and oscillators"
               >

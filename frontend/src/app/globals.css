@@ -448,7 +448,17 @@ body {
 }
 
 .toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
   min-height: 24px;
+  line-height: 1;
+  margin: 0;
+  box-sizing: border-box;
+  vertical-align: middle;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .ind-panel-btn.active {
