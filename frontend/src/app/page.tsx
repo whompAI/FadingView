@@ -806,7 +806,7 @@ export default function Home() {
     const controller = new AbortController();
     const fetchNews = async () => {
       try {
-        const url = `${apiBase}/api/news?symbol=${encodeURIComponent(selected)}&limit=3`;
+        const url = `${apiBase}/api/news?symbol=${encodeURIComponent(selected)}&limit=6`;
         const headers: Record<string, string> = {};
         if (authToken) {
           headers.authorization = `Bearer ${authToken}`;
