@@ -268,8 +268,10 @@ export default function Home() {
   const watchlistVsplitRef = useRef<HTMLDivElement | null>(null);
   const watchlistDetailRef = useRef<HTMLDivElement | null>(null);
   const watchlistNewsRef = useRef<HTMLDivElement | null>(null);
+  const countdownBadgeRef = useRef<HTMLDivElement | null>(null);
   const watchlistResizeFrameRef = useRef<number | null>(null);
   const watchlistListResizeFrameRef = useRef<number | null>(null);
+  const countdownBadgeFrameRef = useRef<number | null>(null);
   const watchlistResizeStateRef = useRef({
     active: false,
     startX: 0,
@@ -1022,6 +1024,60 @@ export default function Home() {
         }
       }
     });
+    const updateCountdownBadgeFromChart = () => {
+      const chartContainer = chartRef.current;
+      const badge = countdownBadgeRef.current;
+      if (!chartContainer || !badge) return;
+
+      let latestCandle = candlesRef.current.length
+        ? candlesRef.current[candlesRef.current.length - 1]
+        : null;
+      if (extEnabledRef.current && extCandlesRef.current.length > 0) {
+        const extLast = extCandlesRef.current[extCandlesRef.current.length - 1];
+        if (!latestCandle || Number(extLast.time) > Number(latestCandle.time)) {
+          latestCandle = extLast;
+        }
+      }
+      if (!latestCandle) {
+        badge.style.opacity = "0";
+        return;
+      }
+
+      const rect = chartContainer.getBoundingClientRect();
+      const width = Math.round(rect.width);
+      const height = Math.round(rect.height);
+      if (width < 16 || height < 16) {
+        badge.style.opacity = "0";
+        return;
+      }
+
+      const xCoord = chart.timeScale().timeToCoordinate(latestCandle.time as Time);
+      const lowY = mainSeries.priceToCoordinate(latestCandle.low);
+      const closeY = mainSeries.priceToCoordinate(latestCandle.close);
+      const badgeRect = badge.getBoundingClientRect();
+      const badgeWidth = Math.max(56, Math.round(badgeRect.width));
+      const badgeHeight = Math.max(18, Math.round(badgeRect.height));
+      const rawLeft = (xCoord ?? width - 70) - badgeWidth / 2;
+      const rawTop = (lowY ?? closeY ?? height - badgeHeight - 12) + 12;
+      const left = Math.max(8, Math.min(width - badgeWidth - 8, rawLeft));
+      const top = Math.max(8, Math.min(height - badgeHeight - 8, rawTop));
+
+      badge.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+      badge.style.opacity = "1";
+    };
+
+    const scheduleCountdownBadgeFromChart = () => {
+      if (countdownBadgeFrameRef.current != null) return;
+      countdownBadgeFrameRef.current = window.requestAnimationFrame(() => {
+        countdownBadgeFrameRef.current = null;
+        updateCountdownBadgeFromChart();
+      });
+    };
+
+    const onVisibleRangeChange = () => {
+      scheduleCountdownBadgeFromChart();
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
 
     let rsiChart: IChartApi | null = null;
     let rsiSeries: ISeriesApi<"Line"> | null = null;
@@ -1099,6 +1155,7 @@ export default function Home() {
             });
           }
         }
+        scheduleCountdownBadgeFromChart();
       });
     };
     const resizeObserver = new ResizeObserver(() => handleResize());
@@ -1107,7 +1164,10 @@ export default function Home() {
       resizeObserver.observe(rsiChartRef.current);
     }
     window.addEventListener("resize", handleResize);
-    const rafId = window.requestAnimationFrame(() => handleResize());
+    const rafId = window.requestAnimationFrame(() => {
+      handleResize();
+      scheduleCountdownBadgeFromChart();
+    });
 
     return () => {
       window.removeEventListener("resize", handleResize);
@@ -1120,6 +1180,7 @@ export default function Home() {
       if (syncRange) {
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncRange);
       }
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       if (rsiChart) {
         rsiChart.remove();
       }
@@ -1447,6 +1508,58 @@ export default function Home() {
     return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
   }, []);
 
+  const updateCountdownBadgePosition = useCallback(() => {
+    const chart = chartApiRef.current;
+    const mainSeries = seriesRef.current;
+    const chartContainer = chartRef.current;
+    const badge = countdownBadgeRef.current;
+    if (!chart || !mainSeries || !chartContainer || !badge) return;
+
+    let latestCandle = candlesRef.current.length
+      ? candlesRef.current[candlesRef.current.length - 1]
+      : null;
+    if (extEnabledRef.current && extCandlesRef.current.length > 0) {
+      const extLast = extCandlesRef.current[extCandlesRef.current.length - 1];
+      if (!latestCandle || Number(extLast.time) > Number(latestCandle.time)) {
+        latestCandle = extLast;
+      }
+    }
+    if (!latestCandle) {
+      badge.style.opacity = "0";
+      return;
+    }
+
+    const rect = chartContainer.getBoundingClientRect();
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    if (width < 16 || height < 16) {
+      badge.style.opacity = "0";
+      return;
+    }
+
+    const xCoord = chart.timeScale().timeToCoordinate(latestCandle.time as Time);
+    const lowY = mainSeries.priceToCoordinate(latestCandle.low);
+    const closeY = mainSeries.priceToCoordinate(latestCandle.close);
+    const badgeRect = badge.getBoundingClientRect();
+    const badgeWidth = Math.max(56, Math.round(badgeRect.width));
+    const badgeHeight = Math.max(18, Math.round(badgeRect.height));
+    const rawLeft = (xCoord ?? width - 70) - badgeWidth / 2;
+    const rawTop = (lowY ?? closeY ?? height - badgeHeight - 12) + 12;
+    const left = Math.max(8, Math.min(width - badgeWidth - 8, rawLeft));
+    const top = Math.max(8, Math.min(height - badgeHeight - 8, rawTop));
+
+    badge.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+    badge.style.opacity = "1";
+  }, []);
+
+  const queueCountdownBadgePosition = useCallback(() => {
+    if (countdownBadgeFrameRef.current != null) return;
+    countdownBadgeFrameRef.current = window.requestAnimationFrame(() => {
+      countdownBadgeFrameRef.current = null;
+      updateCountdownBadgePosition();
+    });
+  }, [updateCountdownBadgePosition]);
+
   const applyWatchlistWidthCssVar = useCallback((width: number) => {
     if (!mainContainerRef.current) return;
     mainContainerRef.current.style.setProperty("--watchlist-width", `${width}px`);
@@ -1672,6 +1785,13 @@ export default function Home() {
   }, [stopWatchlistResize]);
 
   useEffect(() => () => {
+    if (countdownBadgeFrameRef.current != null) {
+      window.cancelAnimationFrame(countdownBadgeFrameRef.current);
+      countdownBadgeFrameRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => {
     stopWatchlistListResize();
   }, [stopWatchlistListResize]);
 
@@ -1804,6 +1924,17 @@ export default function Home() {
     const remaining = Math.max(0, nextBarTs - nowSec);
     return `Next ${formatCountdown(remaining)}`;
   }, [chartLastTs, clockTs, formatCountdown, timeframe]);
+
+  useEffect(() => {
+    queueCountdownBadgePosition();
+  }, [
+    queueCountdownBadgePosition,
+    candleCountdownLabel,
+    chartLastTs,
+    timeframe,
+    watchlistWidth,
+    showRsi,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2482,9 +2613,6 @@ export default function Home() {
               >
                 {headerChange != null ? formatSigned(headerChange, "%") : "--"}
               </div>
-              <div className="tv-countdown" title="Time until next candle boundary.">
-                {candleCountdownLabel}
-              </div>
             </div>
           </div>
         </div>
@@ -2769,6 +2897,13 @@ export default function Home() {
             }}
           >
             <div className="chart-container" ref={chartRef} />
+            <div
+              ref={countdownBadgeRef}
+              className="chart-candle-countdown"
+              title="Time until next candle boundary."
+            >
+              {candleCountdownLabel}
+            </div>
             <div
               className={`rsi-container ${showRsi ? "active" : ""}`}
               ref={rsiChartRef}
