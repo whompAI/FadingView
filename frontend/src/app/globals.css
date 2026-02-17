@@ -906,6 +906,9 @@ body {
 
 .watchlist-header {
   padding: 10px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -914,50 +917,32 @@ body {
 }
 
 .watchlist-title {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.8px;
+  letter-spacing: 1px;
   text-transform: uppercase;
-  color: var(--text-primary);
-  line-height: 1.1;
-  white-space: nowrap;
-}
-
-.watchlist-title-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .watchlist-meta {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  gap: 8px;
 }
 
 .chart-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 7px;
-  font-size: 9px;
-  line-height: 1.2;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
   white-space: nowrap;
-  color: var(--text-secondary);
 }
 
 .watchlist-state {
-  font-size: 8px;
-  letter-spacing: 0.8px;
-  padding: 2px 6px;
+  font-size: 9px;
+  letter-spacing: 0.9px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  text-transform: uppercase;
 }
 
 .watchlist-state.is-live {
@@ -971,7 +956,7 @@ body {
 }
 
 .watchlist-updated {
-  font-size: 9px;
+  font-size: 10px;
   text-transform: none;
   letter-spacing: 0.2px;
   color: var(--text-secondary);
@@ -987,51 +972,46 @@ body {
 
 .watch-sync-synced {
   color: #85e8bf;
-  border-color: rgba(0, 208, 132, 0.45);
 }
 
 .watch-sync-syncing {
   color: #9cb4ff;
-  border-color: rgba(122, 179, 255, 0.45);
 }
 
 .watch-sync-error {
   color: #ff7f84;
-  border-color: rgba(255, 90, 95, 0.55);
 }
 
 .watch-sync-local {
   color: var(--text-secondary);
-  border-color: rgba(106, 122, 115, 0.5);
 }
 
 .watchlist-count {
-  color: var(--text-primary);
-  font-size: 9px;
-  text-transform: uppercase;
+  color: var(--text-secondary);
 }
 
 .watchlist-split-handle {
-  height: 10px;
-  flex: 0 0 10px;
+  height: 14px;
+  flex: 0 0 14px;
   cursor: row-resize;
   position: relative;
-  background: rgba(11, 15, 13, 0.5);
+  background: rgba(11, 15, 13, 0.7);
+  touch-action: none;
 }
 
 .watchlist-split-handle::before {
   content: "";
   position: absolute;
-  left: 10px;
-  right: 10px;
-  top: 4px;
+  left: 8px;
+  right: 8px;
+  top: 5px;
   height: 2px;
-  background: rgba(106, 122, 115, 0.45);
+  background: rgba(106, 122, 115, 0.55);
   border-radius: 999px;
 }
 
 .watchlist-split-handle:hover::before {
-  background: rgba(122, 179, 255, 0.7);
+  background: rgba(122, 179, 255, 0.9);
 }
 
 .watchlist-controls {
@@ -1287,15 +1267,13 @@ body {
   font-weight: 600;
   letter-spacing: 0.4px;
   font-size: 11px;
-  line-height: 1.1;
 }
 
 .sym-name {
-  font-size: 10px;
+  font-size: 8px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.4px;
-  line-height: 1.1;
+  letter-spacing: 0.6px;
 }
 
 .sparkline {
