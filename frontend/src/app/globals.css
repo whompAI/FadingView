@@ -872,14 +872,15 @@ body {
 }
 
 .watchlist-section {
-  width: 340px;
-  min-width: 280px;
+  width: 360px;
+  min-width: 320px;
   background: linear-gradient(180deg, rgba(17, 27, 23, 0.96), rgba(13, 20, 17, 0.98));
   display: flex;
   flex-direction: column;
   flex: 0 0 auto;
   min-height: 0;
   height: 100%;
+  overflow: hidden;
   container-type: inline-size;
   box-shadow: -8px 0 20px rgba(0, 0, 0, 0.22);
 }
@@ -998,6 +999,7 @@ body {
   height: 210px;
   min-height: 0;
   min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -1086,11 +1088,19 @@ body {
 .detail-row-price {
   font-size: 18px;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detail-row-pct {
   font-size: 12px;
   letter-spacing: 0.4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detail-row-ext .detail-row-label {
@@ -1151,6 +1161,7 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   gap: 8px;
+  overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
   overscroll-behavior: contain;
@@ -1195,6 +1206,7 @@ body {
   cursor: pointer;
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .watch-item:hover {
@@ -1231,6 +1243,9 @@ body {
   font-weight: 600;
   letter-spacing: 0.4px;
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sym-name {
@@ -1238,6 +1253,9 @@ body {
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sparkline {
@@ -1265,11 +1283,17 @@ body {
 .sym-last {
   font-size: 11px;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sym-change {
   font-size: 9px;
   color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sym-change.change-up {

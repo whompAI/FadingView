@@ -194,8 +194,8 @@ const CORE_TIMEFRAMES = ["1h", "4h", "1d", "1w"];
 const ADVANCED_TIMEFRAMES = ["1m", "5m", "15m", "30m"];
 const DEFAULT_TIMEFRAME = "1h";
 const MAX_WATCHLIST = 50;
-const DEFAULT_WATCHLIST_WIDTH = 340;
-const MIN_WATCHLIST_WIDTH = 280;
+const DEFAULT_WATCHLIST_WIDTH = 360;
+const MIN_WATCHLIST_WIDTH = 320;
 const MIN_CHART_WIDTH = 460;
 const DEFAULT_WATCHLIST_LIST_HEIGHT = 210;
 const MIN_WATCHLIST_LIST_HEIGHT = 120;
@@ -1461,16 +1461,6 @@ export default function Home() {
     });
   }, []);
 
-  const onWatchlistPointerMove = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const state = watchlistResizeStateRef.current;
-      if (!state.active || state.pointerId !== event.pointerId) return;
-      event.preventDefault();
-      applyWatchlistResize(event.clientX);
-    },
-    [applyWatchlistResize]
-  );
-
   const stopWatchlistResize = useCallback(() => {
     const state = watchlistResizeStateRef.current;
     if (!state.active) return;
@@ -1524,35 +1514,43 @@ export default function Home() {
       if (event.pointerType === "mouse" && event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
-      event.currentTarget.setPointerCapture(event.pointerId);
       startWatchlistResize(event.clientX, event.pointerId);
     },
     [startWatchlistResize]
   );
 
-  const onWatchlistPointerUp = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const state = watchlistResizeStateRef.current;
-      if (!state.active || state.pointerId !== event.pointerId) return;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      stopWatchlistResize();
-    },
-    [stopWatchlistResize]
-  );
+  useEffect(() => {
+    if (!isResizingWatchlist) return;
 
-  const onWatchlistPointerCancel = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
+    const onPointerMove = (event: PointerEvent) => {
       const state = watchlistResizeStateRef.current;
       if (!state.active || state.pointerId !== event.pointerId) return;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
+      event.preventDefault();
+      applyWatchlistResize(event.clientX);
+    };
+
+    const onPointerEnd = (event: PointerEvent) => {
+      const state = watchlistResizeStateRef.current;
+      if (!state.active || state.pointerId !== event.pointerId) return;
       stopWatchlistResize();
-    },
-    [stopWatchlistResize]
-  );
+    };
+
+    const onWindowBlur = () => {
+      stopWatchlistResize();
+    };
+
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", onPointerEnd);
+    window.addEventListener("pointercancel", onPointerEnd);
+    window.addEventListener("blur", onWindowBlur);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerEnd);
+      window.removeEventListener("pointercancel", onPointerEnd);
+      window.removeEventListener("blur", onWindowBlur);
+    };
+  }, [applyWatchlistResize, isResizingWatchlist, stopWatchlistResize]);
 
   const applyWatchlistListResize = useCallback((clientY: number) => {
     const state = watchlistListResizeStateRef.current;
@@ -2804,9 +2802,6 @@ export default function Home() {
           aria-label="Resize watchlist panel"
           aria-orientation="vertical"
           onPointerDown={onWatchlistPointerDown}
-          onPointerMove={onWatchlistPointerMove}
-          onPointerUp={onWatchlistPointerUp}
-          onPointerCancel={onWatchlistPointerCancel}
         />
 
         <aside
