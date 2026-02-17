@@ -925,10 +925,10 @@ body {
 
 .watchlist-meta {
   display: inline-flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 8px;
-  row-gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: nowrap;
   max-width: calc(100% - 22px);
 }
 
@@ -936,8 +936,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  row-gap: 4px;
 }
 
 .chart-chip {
@@ -1002,7 +1000,8 @@ body {
 }
 
 .watchlist-split-handle {
-  height: 14px;
+  height: 16px;
+  min-height: 16px;
   flex: 0 0 14px;
   cursor: row-resize;
   position: relative;
@@ -1015,7 +1014,7 @@ body {
   position: absolute;
   left: 8px;
   right: 8px;
-  top: 5px;
+  top: 7px;
   height: 2px;
   background: rgba(106, 122, 115, 0.55);
   border-radius: 999px;

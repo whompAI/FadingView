@@ -2635,35 +2635,16 @@ export default function Home() {
           <div className="watchlist-header">
             <span className="watchlist-title">Watchlist</span>
             <div className="watchlist-meta">
-              <div className="watchlist-title-meta">
-                <span
-                  className={"chart-chip watchlist-state " + (quotesStale ? "is-stale" : "is-live")}
-                  title={
-                    quotesStale
-                      ? "Using cached quotes due to upstream delay/error."
-                      : "Receiving delayed stream updates."
-                  }
-                >
-                  {quotesStale ? "Stale" : "Live"}
-                </span>
-                <span
-                  className="chart-chip watchlist-updated"
-                  title={
-                    watchlistLastQuoteTs
-                      ? "Latest quote " + new Date(
-                          watchlistLastQuoteTs * 1000
-                        ).toLocaleTimeString("en-US", {
-                          hour: "numeric",
-                          minute: "2-digit",
-                          second: "2-digit",
-                          hour12: true,
-                        })
-                      : "No quote timestamp yet."
-                  }
-                >
-                  {watchlistFreshnessLabel}
-                </span>
-              </div>
+              <span
+                className={"chart-chip watchlist-state " + (quotesStale ? "is-stale" : "is-live")}
+                title={
+                  quotesStale
+                    ? "Using cached quotes due to upstream delay/error."
+                    : "Receiving delayed stream updates."
+                }
+              >
+                {quotesStale ? "Stale" : "Live"}
+              </span>
               <span className={"chart-chip watch-sync " + "watch-sync-" + syncState} title="Watchlist sync status">
                 {syncState === "synced" ? "Synced" : syncState === "syncing" ? "Syncing" : syncState === "error" ? "Sync error" : "Local"}
               </span>
