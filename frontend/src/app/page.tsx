@@ -366,9 +366,13 @@ export default function Home() {
   const selectedQuote = quotes[selected];
   const headerPrice = selectedQuote?.price;
   const headerChange = selectedQuote?.changePct;
-  const headerName = selectedQuote?.name;
-  const headerExchange = selectedQuote?.exchange;
   const headerSession = selectedQuote?.session;
+  const headerSessionLabel =
+    headerSession === "pre"
+      ? "Pre-Market"
+      : headerSession === "post"
+      ? "After Hours"
+      : null;
   const detailRthPrice = selectedQuote?.rthPrice ?? selectedQuote?.price;
   const detailRthChange = selectedQuote?.rthChange ?? selectedQuote?.change;
   const detailRthChangePct = selectedQuote?.rthChangePct ?? selectedQuote?.changePct;
@@ -2512,8 +2516,6 @@ export default function Home() {
     setShowIndicatorPanel(false);
     setChartMenu((prev) => ({ ...prev, open: false }));
   }, []);
-  const headerExchangeLabel = formatExchangeLabel(headerExchange);
-
   const handleChartsLogin = useCallback(async () => {
     setLoginError(null);
     const username = loginUsername.trim();
@@ -2595,13 +2597,6 @@ export default function Home() {
           <div className="tv-headline">
             <div className="tv-symbol">
               <div className="tv-ticker">{selected || "--"}</div>
-              <div className="tv-name-row">
-                <span className="tv-name">{headerName || "—"}</span>
-                {headerExchange && <span className="tv-exchange">{headerExchangeLabel}</span>}
-                {headerSession && headerSession !== "rth" && (
-                  <span className="session-badge">{headerSession.toUpperCase()}</span>
-                )}
-              </div>
             </div>
             <div className="tv-price">
               <div className="tv-last">
@@ -2618,6 +2613,9 @@ export default function Home() {
               >
                 {headerChange != null ? formatSigned(headerChange, "%") : "--"}
               </div>
+              {headerSessionLabel && (
+                <span className="session-badge session-inline">{headerSessionLabel}</span>
+              )}
             </div>
           </div>
         </div>

@@ -178,8 +178,8 @@ body {
 
 .tv-headline {
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
   flex-shrink: 1;
 }
@@ -218,9 +218,8 @@ body {
 }
 
 .tv-symbol {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
 }
 
@@ -232,10 +231,10 @@ body {
   background: rgba(0, 0, 0, 0.32);
   border-radius: 5px;
   padding: 1px 6px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.6px;
-  line-height: 1.2;
+  line-height: 1;
 }
 
 .tv-name {
@@ -265,22 +264,22 @@ body {
 .tv-price {
   display: inline-flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 8px;
   margin-left: 0;
   min-width: 0;
 }
 
 .tv-last {
-  font-size: 34px;
+  font-size: 30px;
   font-weight: 700;
-  line-height: 0.95;
+  line-height: 1;
   letter-spacing: -0.55px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .tv-change {
-  font-size: 14px;
+  font-size: 13px;
   font-family: var(--font-mono);
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -289,13 +288,18 @@ body {
 
 .session-badge {
   font-size: 9px;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  padding: 2px 6px;
+  letter-spacing: 0.3px;
+  text-transform: none;
+  padding: 2px 7px;
   border: 1px solid rgba(255, 180, 84, 0.45);
   border-radius: 999px;
   color: #ffb454;
   line-height: 1;
+}
+
+.session-inline {
+  margin-left: 2px;
+  align-self: center;
 }
 
 .tf-pill {
