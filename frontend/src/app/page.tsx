@@ -2633,40 +2633,6 @@ export default function Home() {
           ))}
         </div>
         <div className="tv-right">
-          <nav className="tv-app-nav" aria-label="Whomp sections">
-            <a
-              className="tv-app-link"
-              href="https://whomp.ai/alphaai"
-              target="_top"
-              rel="noreferrer"
-            >
-              Alpha AI
-            </a>
-            <a
-              className="tv-app-link"
-              href="https://whomp.ai/flow-tape"
-              target="_top"
-              rel="noreferrer"
-            >
-              Flow Tape
-            </a>
-            <a
-              className="tv-app-link"
-              href="https://whomp.ai/news"
-              target="_top"
-              rel="noreferrer"
-            >
-              The Wire
-            </a>
-            <a
-              className="tv-app-link"
-              href="https://whomp.ai/ticker/NVDA"
-              target="_top"
-              rel="noreferrer"
-            >
-              Ticker Intel
-            </a>
-          </nav>
           <div className="tv-actions">
             <div className="indicator-control">
               <button
@@ -2819,6 +2785,40 @@ export default function Home() {
               Snapshot
             </button>
           </div>
+          <nav className="tv-app-nav" aria-label="Whomp sections">
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/alphaai"
+              target="_top"
+              rel="noreferrer"
+            >
+              Alpha AI
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/flow-tape"
+              target="_top"
+              rel="noreferrer"
+            >
+              Flow Tape
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/news"
+              target="_top"
+              rel="noreferrer"
+            >
+              The Wire
+            </a>
+            <a
+              className="tv-app-link"
+              href="https://whomp.ai/ticker/NVDA"
+              target="_top"
+              rel="noreferrer"
+            >
+              Ticker Intel
+            </a>
+          </nav>
           <div className="tv-status">
             <div className={`stream-pill ${streamMode}`}>
               {streamMode === "stream"
