@@ -2592,7 +2592,9 @@ export default function Home() {
       <header className="tv-toolbar">
         <div className="tv-left">
           <div className="logo">
-            <Image src="/whomp-logo.svg" alt="whomp logo" width={68} height={22} priority />
+            <a href="https://whomp.ai/alphaai" target="_top" rel="noreferrer">
+              <Image src="/whomp-logo.svg" alt="whomp logo" width={68} height={22} priority />
+            </a>
           </div>
           <div className="tv-headline">
             <div className="tv-symbol">
