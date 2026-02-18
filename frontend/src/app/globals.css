@@ -2046,3 +2046,30 @@ body {
     font-size: 10px;
   }
 }
+
+.ticker-embed-shell .tv-toolbar {
+  display: none;
+}
+
+.ticker-embed-shell .main-container {
+  display: flex;
+  grid-template-columns: none;
+  height: 100vh;
+}
+
+.ticker-embed-shell .chart-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-right: none;
+}
+
+.ticker-embed-shell .watchlist-resize-handle,
+.ticker-embed-shell .watchlist-section,
+.ticker-embed-shell .charts-lock-overlay,
+.ticker-embed-shell .charts-login-backdrop {
+  display: none !important;
+}
+
+.ticker-embed-shell .chart-header {
+  padding: 4px 10px;
+}
